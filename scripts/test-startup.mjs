@@ -77,6 +77,23 @@ async function waitForHealth(child, port, output) {
   throw new Error(`Server nije odgovorio na health proveru:\n${output()}`);
 }
 
+test('production CSS sadrzi HEX fallback boje za starije browsere', () => {
+  const assetsDirectory = path.join(ROOT, 'dist', 'assets');
+  const cssFile = fs.readdirSync(assetsDirectory).find((file) => file.endsWith('.css'));
+  assert.ok(cssFile, 'Nedostaje production CSS fajl');
+  const css = fs.readFileSync(path.join(assetsDirectory, cssFile), 'utf8');
+
+  for (const variable of ['--color-emerald-500', '--color-red-500', '--color-gray-300']) {
+    assert.match(css, new RegExp(`${variable}:#[0-9a-f]{6}`, 'i'), `${variable} nema HEX fallback`);
+  }
+
+  // Boje sa providnoscu takodje moraju imati obicnu vrednost pre color-mix nadogradnje.
+  assert.ok(
+    css.includes('.bg-emerald-600\\/10{background-color:#'),
+    'Nedostaje HEX fallback za providnu emerald pozadinu',
+  );
+});
+
 test('standalone paket se pokrece i servira API i web interfejs', { timeout: 15000 }, async () => {
   const directory = makeStandaloneCopy();
   const port = await getFreePort();

@@ -6,6 +6,11 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    build: {
+      // Tailwind 4 koristi oklch/color-mix. Za starije intranet browsere
+      // LightningCSS dodaje HEX/RGB vrednosti koje ne zavise od tih funkcija.
+      cssTarget: ['chrome80', 'edge80', 'firefox78', 'safari13'],
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
