@@ -1,0 +1,6 @@
+{
+  "name": "NET-SCAN | Intranet Network Monitor & Web Terminal",
+  "description": "Profesionalni sistem za nadzor lokalne i offline mreže sa ugrađenom web CMD konzolom za ping, tracert i telnet, skenerom podmreža, mapama zgrada i oglasnom tablom.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

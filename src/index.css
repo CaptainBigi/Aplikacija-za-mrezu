@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark !important;
+    --bg-dark: #0f1117;
+    --card-bg: #181b24;
+    --border-color: #262a36;
+    --text-main: #f3f4f6;
+    --text-muted: #9ca3af;
+    --green-bright: #22c55e;
+    --red-main: #ef4444;
+  }
+
+  html, body, #root {
+    color-scheme: dark !important;
+    background-color: #0f1117 !important;
+    color: #f3f4f6 !important;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+    forced-color-adjust: none;
+  }
+
+  input, select, textarea, button, dialog {
+    color-scheme: dark !important;
+    forced-color-adjust: none;
+  }
+
+  option {
+    background-color: #181b24 !important;
+    color: #f3f4f6 !important;
+  }
+
+  table {
+    border-collapse: collapse;
+    color: #f3f4f6;
+  }
+}
+
+/* Theme accent highlights */
+[data-theme-accent="emerald"] {
+  --primary-accent: #10b981;
+}
+[data-theme-accent="cyan"] {
+  --primary-accent: #06b6d4;
+}
+[data-theme-accent="purple"] {
+  --primary-accent: #a855f7;
+}
+[data-theme-accent="amber"] {
+  --primary-accent: #f59e0b;
+}
+
+/* Custom sleek scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #11141c;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b3142;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3e465d;
+}
+
+/* Terminal blinking cursor */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.terminal-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background-color: #22c55e;
+  vertical-align: text-bottom;
+  animation: blink 1s step-start infinite;
+}
+
+/* Print styling for statistics modal */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #print-area, #print-area * {
+    visibility: visible;
+  }
+  #print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    color: #000;
+    background: #fff;
+    padding: 20px;
+  }
+}

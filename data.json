@@ -1,0 +1,151 @@
+{
+  "devices": [
+    {
+      "id": 1,
+      "name": "Switch Glavni (Core)",
+      "ip": "11.29.50.1",
+      "location": "Beograd",
+      "type": "Switch",
+      "status": "ONLINE",
+      "latency": "2 ms",
+      "statusSince": 1792160000000,
+      "mac": "00:1A:2B:3C:4D:01",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 2,
+      "name": "Switch Server Sala",
+      "ip": "11.29.50.2",
+      "location": "Beograd",
+      "type": "Switch",
+      "status": "ONLINE",
+      "latency": "3 ms",
+      "statusSince": 1792000000000,
+      "mac": "00:1A:2B:3C:4D:02",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 3,
+      "name": "Fajl Server (Storage)",
+      "ip": "11.29.50.10",
+      "location": "Beograd",
+      "type": "Server",
+      "status": "ONLINE",
+      "latency": "3 ms",
+      "statusSince": 1791393760961,
+      "mac": "00:1A:2B:3C:4D:10",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 4,
+      "name": "HP LaserJet M404n",
+      "ip": "11.29.50.45",
+      "location": "Beograd",
+      "type": "Štampač",
+      "status": "ONLINE",
+      "latency": "2 ms",
+      "statusSince": 1792250000000,
+      "mac": "E4:E7:49:12:34:45",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 5,
+      "name": "Switch Sprat 1",
+      "ip": "192.168.1.1",
+      "location": "Novi Sad",
+      "type": "Switch",
+      "status": "ONLINE",
+      "latency": "3 ms",
+      "statusSince": 1791700000000,
+      "mac": "CC:D2:81:AA:BB:CC",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 6,
+      "name": "PC-Knjigovodstvo-01",
+      "ip": "192.168.1.15",
+      "location": "Novi Sad",
+      "type": "Računar",
+      "status": "ONLINE",
+      "latency": "3 ms",
+      "statusSince": 1792340000000,
+      "mac": "B4:2E:99:44:55:15",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 7,
+      "name": "Rezervni Ruter Niš",
+      "ip": "10.10.1.1",
+      "location": "Niš",
+      "type": "Ruter",
+      "status": "ONLINE",
+      "latency": "2 ms",
+      "statusSince": 1791220000000,
+      "mac": "A0:B3:CC:11:22:33",
+      "offlineSince": null,
+      "loggedOffline": false
+    },
+    {
+      "id": 8,
+      "name": "Switch Magacin",
+      "ip": "10.10.1.2",
+      "location": "Niš",
+      "type": "Switch",
+      "status": "OFFLINE",
+      "latency": "-",
+      "statusSince": 1792428000000,
+      "mac": "A0:B3:CC:99:88:77",
+      "offlineSince": 1792428000000,
+      "loggedOffline": true
+    }
+  ],
+  "maps": [],
+  "logs": [
+    {
+      "id": 1792428000000,
+      "deviceName": "Switch Magacin",
+      "deviceIp": "10.10.1.2",
+      "timestamp": 1792428000000,
+      "type": "error",
+      "message": "Uređaj ne odgovara duže od 10 minuta.",
+      "isRead": false
+    },
+    {
+      "id": 1792300000000,
+      "deviceName": "HP LaserJet M404n",
+      "deviceIp": "11.29.50.45",
+      "timestamp": 1792300000000,
+      "type": "recovery",
+      "message": "Uređaj je ponovo dostupan i radi normalno.",
+      "isRead": true
+    }
+  ],
+  "switchNetworks": {},
+  "switchScanTimes": {},
+  "customLabels": {
+    "11.29.50.1": "Glavni Ulazni Switch",
+    "11.29.50.10": "Glavni Fajl Server",
+    "11.29.50.45": "Mrežni Štampač Prizemlje",
+    "192.168.1.15": "Radna Stanica - Jovan"
+  },
+  "chat": [
+    {
+      "id": 1,
+      "user": "N1ko7a",
+      "message": "Pozdrav kolege! Postavio sam NET-SCAN monitor i ugradio CMD konzolu direktno u aplikaciju tako da svako može sa svog računara raditi ping i tracert bez otvaranja prozora na serveru.",
+      "timestamp": 1792420000000
+    },
+    {
+      "id": 2,
+      "user": "Kolega-IT",
+      "message": "Odlično, sada možemo direktno u browseru gledati odziv i ispitivati porte!",
+      "timestamp": 1792425000000
+    }
+  ]
+}

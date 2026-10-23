@@ -1,0 +1,75 @@
+=========================================================
+      NET-SCAN INTRANET MONITOR - KORISNICKO UPUTSTVO
+=========================================================
+
+1. KAKO SE POKRECE APLIKACIJA?
+- Aplikacija se pokrece dvoklikom na fajl "start.bat".
+- JEDINI preduslov: Na racunaru mora biti instaliran Node.js (preuzmite ga jednom sa zvanicnog sajta ili prenesite instalaciju preko USB-a na racunar u zatvorenoj mrezi, npr. verziju 18, 20 ili 22 LTS).
+- 100% OFFLINE SPREMNOST: Kompletan program sa web terminalom i interfejsom je unapred preveden i spakovan ("server.js" i "dist"), tako da radi potpuno samostalno u zatvorenoj mrezi bez potrebe za internetom, bez "npm install" i bez "tsx"!
+- Opciono: Ako zelite da se aplikacija pali sama pri svakom paljenju racunara, pokrenite fajl "install_startup.bat" i pratite uputstva.
+- Na ekranu ce se otvoriti crni prozor (CMD), a browser ce se automatski otvoriti cim server bude spreman. Ako se browser ne otvori, ukucajte http://localhost:3000.
+- CMD prozor mora ostati otvoren, jer je to "mozak" vase aplikacije. Ukoliko ga zatvorite na X, aplikacija ce prestati sa radom.
+- Ako je NET-SCAN vec pokrenut, start.bat nece praviti drugu instancu, nego ce otvoriti postojecu aplikaciju u browseru.
+- Nemojte preuzimati ili pokretati samo start.bat. Mora se nalaziti u istom folderu sa server.js, package.json i dist folderom.
+
+2. KAKO PRISTUPITI APLIKACIJI (PREKO BROWSERA)?
+- Otvorite Google Chrome, Microsoft Edge ili Firefox.
+- U polje za adresu na vrhu ekrana ukucajte tacno ovo: 
+   http://localhost:3000
+
+--- OBAVEZNO PODESAVANJE DA BI APLIKACIJA BILA SERVER ZA DRUGE RACUNARE ---
+Da bi vase kolege iz drugih kancelarija/zgrada u policijskoj mrezi mogle da koriste ovu aplikaciju istovremeno sa vama, ne moraju da je instaliraju! Dovoljno je da ovaj vas kompjuter "glumi" server. 
+
+Da bi ovo radilo besprekorno, morate uraditi dve stvari na OVOM vasem (glavnom) racunaru:
+
+KORAK A: Saznajte vasu fiksnu IP adresu
+1. Otvorite Start i ukucajte CMD.
+2. U crnom prozoru ukucajte komandu: ipconfig i pritisnite Enter.
+3. Pronadjite red na kome pise "IPv4 Address" (na primer: 11.29.50.15 ili 192.168.1.10).
+Vase kolege ce na svom kompjuteru morati da ukucaju http://11.29.50.15:3000 u Chrome da bi im se otvorio NET-SCAN program!
+
+KORAK B: Propustanje portova kroz Firewall (Najbitnije!)
+Da Windows ne bi blokirao druge da vam pristupe na aplikaciju, morate "otkljucati" port 3000.
+1. Kliknite na Windows Start i ukucajte "Windows Defender Firewall with Advanced Security" (Zastitni zid sa naprednom bezbednoscu).
+2. Sa leve strane kliknite na Inbound Rules (Ulazna pravila).
+3. Sa desne strane kliknite na New Rule... (Novo pravilo).
+4. Izaberite "Port" -> Next.
+5. Izaberite "TCP", a u polje "Specific local ports" (Odredjeni lokalni portovi) ukucajte: 3000 -> Next.
+6. Izaberite "Allow the connection" (Dozvoli vezu) -> Next -> Next.
+7. Dajte mu ime (npr. "NET-SCAN Server") i kliknite Finish.
+
+Sada je vas racunar zvanicno Mrezni Server! Svi iz mreze koji su povezani sa vama, a znaju vasu IP adresu i sifru, moci ce da gledaju mapu zgrade, pokrecu Tracert i nadgledaju prekid sa svojih racunara preko obicnog internet pregledaca!
+-------------------------------------------------------------------------
+
+3. PODACI ZA PRIJAVU (LOGIN)
+- Korisnicko ime: Admin
+- Lozinka: 123
+*(Aplikacija ce vas drzati ulogovanim sve dok ne kliknete na "Odjavi se" ili dok potpuno ne ugasite pregledac).*
+
+4. GDE SE CUVAJU PODACI I BEKAPI?
+- Glavna baza podataka: Svi vasi dodati uredjaji, imena, mape zgrada, logovi i statusi se automatski cuvaju u fajlu pod imenom "data.json" (koji ce se sam stvoriti u ovom folderu cim dodate prvi uredjaj). NE BRISITE OVAJ FAJL, jer on sadrzi vasu mrezu!
+- Automatski (Nocni) bekapi: Svakog dana aplikacija u pozadini sama pravi kompletnu rezervnu kopiju (backup) baze "data.json" i cuva je u novom folderu "backups".
+- Ciscenje memorije: Aplikacija automatski brise stare bekape iz "backups" foldera koji su stariji od 14 dana kako ne bi prepunila hard disk vaseg racunara.
+
+5. GLAVNE FUNKCIONALNOSTI ZA ADMINISTRATORE:
+- [Ugradjena CMD Konzola]: Kada vi ili vase kolege kliknete na PING, TRACERT ili TELNET na bilo kom uredjaju, crni prozor konzole se otvara DIREKTNO UNUTAR PREGLEDACA svakog korisnika ponaosob!
+  * Vise se ne otvaraju prozori na vasem serverskom racunaru!
+  * Kolege ne moraju nista da preuzimaju niti da pokrecu .bat fajlove na svom racunaru!
+- [Mrezni Skener /24]: Otvorite bilo koji dodati Switch na dugme "OTVORI" da skenirate svih 256 adresa. Skener automatski izvlaci MAC adrese i Imena racunara direktno iz Windows-a, uz mogucnost rucnog dopisivanja klikom na olovku.
+- [Mape Zgrada]: Omogucava da ubacite sliku (tlocrt) ustanove i misem prevucete (drag & drop) rutere i racunare na njihova fizicka mesta za najbrzu vizuelnu detekciju kvara.
+- [Komande iz Browsera]: Klikom na IP adresu, bez izlaska iz programa, mozete pokrenuti PING, TRACERT i TELNET komande, kao i WAKE (Wake-On-LAN) za fizicko paljenje ugasenog racunara na dugme.
+- [Log prekida]: Aplikacija ce svako gasenje racunara ili switch-a koje traje duze od 10 minuta trajno zabeleziti i cuvati u logovima (zajedno sa vremenom kada se mrezna oprema oporavila i vratila online).
+- [Excel Izvestaj]: U donjem levom uglu aplikacije pod menijem "Izvestaji" mozete jednim klikom izvesti stanje cele mreze i svih portova u tabelarni Excel (.csv) fajl, idealan za izvestaje sefovima.
+
+6. ADMINISTRACIJA I DODELJIVANJE IMENA ZA OGLASNU TABLU:
+- Tab "Administracija" se nalazi u levom bocnom meniju odmah ispod stavke "Podesavanja".
+- Ovaj tab se prikazuje ISKLJUCIVO VAMA (glavnom administratoru servera) kada ste prijavljeni sa Admin / 123.
+- Kolege i drugi racunari koji se povezu na vasu IP adresu iz mreze NE VIDE ovaj tab, cime je zasticena bezbednost sistema.
+- U panelu Administracija vidite tacan spisak svih IP adresa koje su pristupile programu.
+- Klikom na ikonicu olovke (Izmeni) pored bilo koje IP adrese mozete uneti ime korisnika (npr. "Milan - Dezurna Sluzba", "Magacin - Marko", "Finansije") i kancelariju/napomenu.
+- Cim dodelite ime, sve prethodne i buduce poruke koje taj kompjuter napise na Oglasnoj tabli ce automatski nositi to ime, tako da uvek znate ko pise obavestenja.
+- Takodje mozete jednim klikom zabraniti pisanje bilo kojoj problematicnoj IP adresi ili preuzeti spisak svih posetilaca u Excel (.csv) formatu.
+
+Napravljeno specijalno za sigurne (offline) mreze.
+Created by N1ko7a
+=========================================================
