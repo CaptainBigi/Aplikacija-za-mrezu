@@ -22898,14 +22898,16 @@ import os from "os";
 import dgram from "dgram";
 import { exec } from "child_process";
 import { fileURLToPath } from "url";
+import { timingSafeEqual } from "crypto";
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
 var app = (0, import_express.default)();
 var PORT = Number(process.env.PORT) || 3e3;
+var WIDGET_API_KEY = process.env.WIDGET_API_KEY || "moj_tajni_token_123";
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
   if (req.method === "OPTIONS") {
     return res.sendStatus(200);
   }
@@ -23288,6 +23290,22 @@ function isHostRequest(req) {
   const hostIps = getLocalHostIps();
   return hostIps.has(ip);
 }
+app.get("/api/widget-stats", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const providedKey = Buffer.from(req.get("X-API-Key") || "", "utf8");
+  const expectedKey = Buffer.from(WIDGET_API_KEY, "utf8");
+  const isAuthorized = providedKey.length === expectedKey.length && timingSafeEqual(providedKey, expectedKey);
+  if (!isAuthorized) {
+    return res.status(401).json({ error: "Nedostaje ili je neispravan X-API-Key token." });
+  }
+  const online = db.devices.filter((device) => device.status === "ONLINE").length;
+  const offline = db.devices.filter((device) => device.status === "OFFLINE").length;
+  return res.json({
+    total: db.devices.length,
+    online,
+    offline
+  });
+});
 app.use((req, res, next) => {
   const ip = getClientIp(req);
   const isHost = isHostRequest(req);

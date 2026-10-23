@@ -26,6 +26,40 @@ Iz foldera u kojem su `server.js`, `package.json` i `dist`:
 npm start
 ```
 
+## API za widget-e
+
+Ruta `GET /api/widget-stats` vraća broj uređaja bez login-a i korisničke sesije. Zahtev mora da sadrži tajno zaglavlje `X-API-Key`.
+
+Podrazumevani token je `moj_tajni_token_123`:
+
+```bash
+curl -H "X-API-Key: moj_tajni_token_123" http://localhost:3000/api/widget-stats
+```
+
+Primer odgovora:
+
+```json
+{
+  "total": 12,
+  "online": 9,
+  "offline": 3
+}
+```
+
+Primer za JavaScript widget (zameni `IP_SERVERA` adresom računara na kojem radi NET-SCAN):
+
+```js
+const response = await fetch('http://IP_SERVERA:3000/api/widget-stats', {
+  headers: { 'X-API-Key': 'moj_tajni_token_123' }
+});
+
+if (!response.ok) throw new Error('Neispravan API token ili server nije dostupan');
+const stats = await response.json();
+console.log(stats.total, stats.online, stats.offline);
+```
+
+Za drugi token postavi promenljivu okruženja `WIDGET_API_KEY` pre pokretanja servera. Na Windowsu to možeš uraditi u istom CMD prozoru sa `set WIDGET_API_KEY=neki_drugi_token`, a zatim pokrenuti `start.bat`.
+
 ## Build i provera izvornog koda
 
 ```bash

@@ -70,6 +70,14 @@ Sada je vas racunar zvanicno Mrezni Server! Svi iz mreze koji su povezani sa vam
 - Cim dodelite ime, sve prethodne i buduce poruke koje taj kompjuter napise na Oglasnoj tabli ce automatski nositi to ime, tako da uvek znate ko pise obavestenja.
 - Takodje mozete jednim klikom zabraniti pisanje bilo kojoj problematicnoj IP adresi ili preuzeti spisak svih posetilaca u Excel (.csv) formatu.
 
+7. API ZA WIDGET-E:
+- Adresa: GET http://IP_SERVERA:3000/api/widget-stats
+- U zaglavlju zahteva posaljite: X-API-Key: moj_tajni_token_123
+- Login i korisnicka sesija nisu potrebni.
+- Odgovor je JSON sa poljima total, online i offline.
+- Bez tokena ili sa pogresnim tokenom server vraca HTTP 401.
+- Za drugi token postavite WIDGET_API_KEY u okruzenju pre pokretanja servera.
+
 Napravljeno specijalno za sigurne (offline) mreze.
 Created by N1ko7a
 =========================================================

@@ -36,7 +36,12 @@ async function getFreePort() {
 function launch(directory, port) {
   const child = spawn(process.execPath, ['server.js'], {
     cwd: directory,
-    env: { ...process.env, PORT: String(port), NET_SCAN_OPEN_BROWSER: 'false' },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      NET_SCAN_OPEN_BROWSER: 'false',
+      WIDGET_API_KEY: 'moj_tajni_token_123',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
@@ -89,7 +94,34 @@ test('standalone paket se pokrece i servira API i web interfejs', { timeout: 150
 
     const devicesResponse = await fetch(`http://127.0.0.1:${port}/api/devices`);
     assert.equal(devicesResponse.status, 200);
-    assert.ok(Array.isArray(await devicesResponse.json()));
+    const devices = await devicesResponse.json();
+    assert.ok(Array.isArray(devices));
+
+    const widgetUrl = `http://127.0.0.1:${port}/api/widget-stats`;
+    const missingKeyResponse = await fetch(widgetUrl);
+    assert.equal(missingKeyResponse.status, 401);
+
+    const wrongKeyResponse = await fetch(widgetUrl, {
+      headers: { 'X-API-Key': 'pogresan_token' },
+    });
+    assert.equal(wrongKeyResponse.status, 401);
+
+    const statsResponse = await fetch(widgetUrl, {
+      headers: { 'X-API-Key': 'moj_tajni_token_123' },
+    });
+    assert.equal(statsResponse.status, 200);
+    assert.deepEqual(await statsResponse.json(), {
+      total: devices.length,
+      online: devices.filter((device) => device.status === 'ONLINE').length,
+      offline: devices.filter((device) => device.status === 'OFFLINE').length,
+    });
+
+    const preflightResponse = await fetch(widgetUrl, {
+      method: 'OPTIONS',
+      headers: { 'Access-Control-Request-Headers': 'X-API-Key' },
+    });
+    assert.equal(preflightResponse.status, 200);
+    assert.match(preflightResponse.headers.get('access-control-allow-headers') || '', /X-API-Key/i);
   } finally {
     await stop(child);
     fs.rmSync(directory, { recursive: true, force: true });
