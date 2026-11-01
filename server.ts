@@ -542,12 +542,28 @@ async function probeHost(ip: string, timeoutSec = 1): Promise<{ alive: boolean; 
         return resolve({ alive: true, time });
       }
 
-      // ICMP je cesto blokiran, pa proveravamo stvarne TCP servise.
-      void (async () => {
-        if (await checkPort(80, ip, 350)) return resolve({ alive: true, time: 2 });
-        if (await checkPort(445, ip, 350)) return resolve({ alive: true, time: 3 });
-        resolve({ alive: false, time: 0 });
-      })().catch(() => resolve({ alive: false, time: 0 }));
+      // ICMP je cesto blokiran. TCP portove proveravamo paralelno i
+      // rezultat vracamo cim prvi servis odgovori, bez cekanja ostalih.
+      const tcpPorts = [80, 443, 445, 135, 22, 9100];
+      const tcpStart = Date.now();
+      let pending = tcpPorts.length;
+      let tcpSettled = false;
+      const completeTcpCheck = (isOpen: boolean) => {
+        if (tcpSettled) return;
+        if (isOpen) {
+          tcpSettled = true;
+          resolve({ alive: true, time: Math.max(1, Date.now() - tcpStart) });
+          return;
+        }
+        pending -= 1;
+        if (pending === 0) {
+          tcpSettled = true;
+          resolve({ alive: false, time: 0 });
+        }
+      };
+      for (const port of tcpPorts) {
+        void checkPort(port, ip, 350).then(completeTcpCheck).catch(() => completeTcpCheck(false));
+      }
     });
   });
 }
@@ -1014,61 +1030,14 @@ async function performSubnetScan(
       hostname = os.hostname() || 'Glavni Server (Host)';
       type = 'Server';
     } else {
-      // Svaka adresa se stvarno proverava; stari ONLINE status nije dokaz da je IP zauzet.
-      // Live probe via socket + ping
-      const probeRes = await new Promise<{ alive: boolean; latency: number }>((resolve) => {
-        let settled = false;
-        let checksRemaining = 3;
+      // Isti ICMP + TCP mehanizam kao i za nadzor; ARP je dodatni L2 dokaz za mapu.
+      const probeRes = await probeHost(ip, 0.3);
+      const hasArpEntry = arpMap.has(ip);
+      isOnline = probeRes.alive || hasArpEntry;
 
-        const tryPing = () => {
-          if (settled) return;
-          const pingCmd = process.platform === 'win32'
-            ? `ping -n 1 -w 200 ${ip}`
-            : `ping -c 1 -W 0.3 ${ip}`;
-
-          exec(pingCmd, { timeout: 1000 }, (err, stdout) => {
-            if (settled) return;
-            if (!err) {
-              settled = true;
-              let time = 3;
-              const timeMatch = process.platform === 'win32'
-                ? stdout.match(/time[=<](\d+)ms/i)
-                : stdout.match(/time=(\d+(?:\.\d+)?)\s*ms/i);
-              if (timeMatch && timeMatch[1]) {
-                time = parseFloat(timeMatch[1]);
-              }
-              return resolve({ alive: true, latency: Math.max(1, Math.round(time)) });
-            }
-            if (arpMap.has(ip)) {
-              settled = true;
-              return resolve({ alive: true, latency: 2 });
-            }
-            resolve({ alive: false, latency: 0 });
-          });
-        };
-
-        // Common probe ports (80 HTTP, 445 SMB, 135 RPC, 22 SSH)
-        [80, 445, 135].forEach((port) => {
-          checkPort(port, ip, 150).then((open) => {
-            if (settled) return;
-            if (open) {
-              settled = true;
-              return resolve({ alive: true, latency: 2 });
-            }
-            checksRemaining--;
-            if (checksRemaining <= 0) {
-              tryPing();
-            }
-          });
-        });
-      });
-
-      if (probeRes.alive) {
-        isOnline = true;
-        latency = `${probeRes.latency} ms`;
-        if (mac === '-' && arpMap.has(ip)) {
-          mac = arpMap.get(ip)!;
-        }
+      if (isOnline) {
+        latency = probeRes.alive ? `${Math.max(1, Math.round(probeRes.time))} ms` : 'ARP';
+        if (mac === '-' && hasArpEntry) mac = arpMap.get(ip)!;
       }
     }
 

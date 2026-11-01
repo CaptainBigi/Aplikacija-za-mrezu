@@ -6,6 +6,7 @@ Aplikacija za nadzor lokalne/offline mreže, sa mapama zgrada, web terminalom, s
 
 - Stvarne ONLINE/OFFLINE promene automatski se objavljuju kao sistemske poruke na oglasnoj tabli, bez duplikata pri ponovnoj proveri istog statusa.
 - Server proverava uređaje 5 sekundi nakon pokretanja i zatim na svakih 60 sekundi.
+- Ako ICMP ping nije dozvoljen, dostupnost se proverava paralelno preko TCP portova 80, 443, 445, 135, 22 i 9100.
 - Skener prikazuje vreme poslednjeg završenog skeniranja i mapu svih 256 adresa: zeleno je zauzeto, sivo slobodno, a tamno neprovereno.
 - Automatsko skeniranje podmreže može da se uključi na 1, 5 ili 15 minuta; podrazumevano je isključeno.
 

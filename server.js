@@ -23270,11 +23270,26 @@ async function probeHost(ip, timeoutSec = 1) {
         if (timeMatch && timeMatch[1]) time = parseFloat(timeMatch[1]);
         return resolve({ alive: true, time });
       }
-      void (async () => {
-        if (await checkPort(80, ip, 350)) return resolve({ alive: true, time: 2 });
-        if (await checkPort(445, ip, 350)) return resolve({ alive: true, time: 3 });
-        resolve({ alive: false, time: 0 });
-      })().catch(() => resolve({ alive: false, time: 0 }));
+      const tcpPorts = [80, 443, 445, 135, 22, 9100];
+      const tcpStart = Date.now();
+      let pending = tcpPorts.length;
+      let tcpSettled = false;
+      const completeTcpCheck = (isOpen) => {
+        if (tcpSettled) return;
+        if (isOpen) {
+          tcpSettled = true;
+          resolve({ alive: true, time: Math.max(1, Date.now() - tcpStart) });
+          return;
+        }
+        pending -= 1;
+        if (pending === 0) {
+          tcpSettled = true;
+          resolve({ alive: false, time: 0 });
+        }
+      };
+      for (const port of tcpPorts) {
+        void checkPort(port, ip, 350).then(completeTcpCheck).catch(() => completeTcpCheck(false));
+      }
     });
   });
 }
@@ -23663,50 +23678,12 @@ async function performSubnetScan(targetBase, switchDevice, onProgress) {
       hostname = os.hostname() || "Glavni Server (Host)";
       type = "Server";
     } else {
-      const probeRes = await new Promise((resolve) => {
-        let settled = false;
-        let checksRemaining = 3;
-        const tryPing = () => {
-          if (settled) return;
-          const pingCmd = process.platform === "win32" ? `ping -n 1 -w 200 ${ip}` : `ping -c 1 -W 0.3 ${ip}`;
-          exec(pingCmd, { timeout: 1e3 }, (err, stdout) => {
-            if (settled) return;
-            if (!err) {
-              settled = true;
-              let time = 3;
-              const timeMatch = process.platform === "win32" ? stdout.match(/time[=<](\d+)ms/i) : stdout.match(/time=(\d+(?:\.\d+)?)\s*ms/i);
-              if (timeMatch && timeMatch[1]) {
-                time = parseFloat(timeMatch[1]);
-              }
-              return resolve({ alive: true, latency: Math.max(1, Math.round(time)) });
-            }
-            if (arpMap.has(ip)) {
-              settled = true;
-              return resolve({ alive: true, latency: 2 });
-            }
-            resolve({ alive: false, latency: 0 });
-          });
-        };
-        [80, 445, 135].forEach((port) => {
-          checkPort(port, ip, 150).then((open) => {
-            if (settled) return;
-            if (open) {
-              settled = true;
-              return resolve({ alive: true, latency: 2 });
-            }
-            checksRemaining--;
-            if (checksRemaining <= 0) {
-              tryPing();
-            }
-          });
-        });
-      });
-      if (probeRes.alive) {
-        isOnline = true;
-        latency = `${probeRes.latency} ms`;
-        if (mac === "-" && arpMap.has(ip)) {
-          mac = arpMap.get(ip);
-        }
+      const probeRes = await probeHost(ip, 0.3);
+      const hasArpEntry = arpMap.has(ip);
+      isOnline = probeRes.alive || hasArpEntry;
+      if (isOnline) {
+        latency = probeRes.alive ? `${Math.max(1, Math.round(probeRes.time))} ms` : "ARP";
+        if (mac === "-" && hasArpEntry) mac = arpMap.get(ip);
       }
     }
     if (isOnline) {

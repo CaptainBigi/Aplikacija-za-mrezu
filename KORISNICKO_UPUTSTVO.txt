@@ -81,6 +81,7 @@ Sada je vas racunar zvanicno Mrezni Server! Svi iz mreze koji su povezani sa vam
 8. STATUS UREĐAJA I MREZNI SKENER:
 - Kada uredjaj stvarno predje iz ONLINE u OFFLINE (ili se oporavi), NET-SCAN odmah upisuje sistemsku poruku na Oglasnu tablu.
 - Pozadinska provera se pokrece 5 sekundi nakon starta servera, a zatim na svakih 60 sekundi. Rucno Skeniraj koristi istu logiku.
+- Dostupnost se proverava pingom, a ako ping ne prolazi, paralelno se proveravaju TCP portovi 80, 443, 445, 135, 22 i 9100.
 - Mrezni skener prikazuje vreme zavrsetka poslednjeg skeniranja i mapu svih 256 adresa: zeleno = zauzeto, sivo = slobodno, tamno = nije provereno.
 - GET ucitavanje skenera samo cita sacuvane rezultate. Novo skeniranje se pokrece dugmetom Skeniraj.
 - Opciono automatsko skeniranje moze da se podesi na 1, 5 ili 15 minuta; podrazumevano je iskljuceno.
