@@ -108,7 +108,7 @@ export default function App() {
 
   // Real-time Chat Sync state
   const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
-  const lastChatCountRef = useRef<number>(0);
+  const seenChatMessageIdsRef = useRef<Set<number> | null>(null);
 
   // Sidebar Submenus
   const [isReportsOpen, setIsReportsOpen] = useState(false);
@@ -274,7 +274,9 @@ export default function App() {
   const fetchDevices = async () => {
     try {
       const res = await fetch('/api/devices');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: Device[] = await res.json();
+      if (!Array.isArray(data)) throw new Error('Neispravan odgovor servera');
 
       // Check for drops to trigger sound alert if enabled
       if (settings.soundAlerts && previousDevicesRef.current.length > 0) {
@@ -296,8 +298,9 @@ export default function App() {
   const fetchMaps = async () => {
     try {
       const res = await fetch('/api/maps');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setMaps(data || []);
+      setMaps(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error('Greška pri dohvatanju mapa:', e);
     }
@@ -306,8 +309,9 @@ export default function App() {
   const fetchLogs = async () => {
     try {
       const res = await fetch('/api/logs');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setLogs(data || []);
+      setLogs(Array.isArray(data) ? data : []);
     } catch (e) {
       console.error('Greška pri dohvatanju logova:', e);
     }
@@ -319,12 +323,13 @@ export default function App() {
       if (res.ok) {
         const data: ChatMessage[] = await res.json();
         if (data && Array.isArray(data)) {
-          const prevCount = lastChatCountRef.current;
+          const seenIds = seenChatMessageIdsRef.current;
+          const newMessages = seenIds === null ? 0 : data.filter((message) => !seenIds.has(message.id)).length;
           setChatMessages(data);
-          if (prevCount > 0 && data.length > prevCount && !isChatOpen) {
-            setUnreadChatCount((prev) => prev + (data.length - prevCount));
+          if (newMessages > 0 && !isChatOpen) {
+            setUnreadChatCount((prev) => prev + newMessages);
           }
-          lastChatCountRef.current = data.length;
+          seenChatMessageIdsRef.current = new Set(data.map((message) => message.id));
         }
       }
     } catch (e) {
@@ -355,8 +360,12 @@ export default function App() {
     setIsScanningAll(true);
     try {
       const res = await fetch('/api/scan', { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setDevices(data || []);
+      if (!Array.isArray(data)) throw new Error('Neispravan odgovor servera');
+      previousDevicesRef.current = data;
+      setDevices(data);
+      await Promise.all([fetchChat(), fetchLogs()]);
     } catch (e) {
       console.error('Greška pri masovnom skeniranju:', e);
     } finally {
@@ -398,6 +407,7 @@ export default function App() {
         body: JSON.stringify(deviceData),
       });
       const updated = await res.json();
+      if (!res.ok) throw new Error(updated.error || 'Izmena uređaja nije uspela');
       setDevices((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
     } else {
       const res = await fetch('/api/devices', {
@@ -406,6 +416,7 @@ export default function App() {
         body: JSON.stringify(deviceData),
       });
       const created = await res.json();
+      if (!res.ok) throw new Error(created.error || 'Dodavanje uređaja nije uspelo');
       setDevices((prev) => [...prev, created]);
     }
     setEditingDevice(null);
@@ -415,7 +426,8 @@ export default function App() {
   const handleDeleteDevice = async (id: number) => {
     if (!confirm('Da li ste sigurni da želite da obrišete ovaj uređaj?')) return;
     try {
-      await fetch(`/api/devices/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/devices/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Brisanje uređaja nije uspelo');
       setDevices((prev) => prev.filter((d) => d.id !== id));
       if (selectedSwitch?.id === id) setSelectedSwitch(null);
     } catch (e) {

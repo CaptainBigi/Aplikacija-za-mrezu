@@ -77,6 +77,10 @@ interface ChatMessage {
   timestamp: number;
   ip?: string;
   assignedName?: string;
+  kind?: 'system';
+  eventType?: 'offline' | 'online';
+  deviceId?: number;
+  deviceIp?: string;
 }
 
 interface ClientSession {
@@ -109,6 +113,14 @@ interface SubnetDevice {
   lastSeenOnline?: number | null;
   offlineSince?: number | null;
   customLabel?: string;
+}
+
+interface SubnetScanProgress {
+  percent: number;
+  scanned: number;
+  total: number;
+  activeCount: number;
+  items?: SubnetDevice[];
 }
 
 interface SettingsData {
@@ -356,6 +368,74 @@ function logActivity(
   return item;
 }
 
+function appendDeviceStatusMessage(device: Device, eventType: 'offline' | 'online', timestamp: number) {
+  if (!db.chat) db.chat = [];
+  const isOffline = eventType === 'offline';
+  db.chat.push({
+    id: Date.now() + Math.random(),
+    user: 'NET-SCAN Sistem',
+    message: isOffline
+      ? `UREĐAJ JE OFFLINE: ${device.name} (${device.ip}) ne odgovara.`
+      : `UREĐAJ JE ONLINE: ${device.name} (${device.ip}) je ponovo dostupan.`,
+    timestamp,
+    kind: 'system',
+    eventType,
+    deviceId: device.id,
+    deviceIp: device.ip,
+  });
+  if (db.chat.length > 200) db.chat = db.chat.slice(-200);
+}
+
+// Jedinstvena obrada statusa koristi se u pozadinskom i rucnom skeniranju.
+// Sistemsku poruku saljemo samo pri stvarnoj ONLINE <-> OFFLINE promeni.
+function updateDeviceStatus(device: Device, isAlive: boolean, responseTime = 0, now = Date.now()): boolean {
+  const previousStatus = device.status;
+  const nextStatus = isAlive ? 'ONLINE' : 'OFFLINE';
+  const statusChanged = previousStatus !== nextStatus;
+
+  if (statusChanged) {
+    device.statusSince = now;
+    if (previousStatus !== 'UNKNOWN') {
+      appendDeviceStatusMessage(device, isAlive ? 'online' : 'offline', now);
+    }
+  }
+
+  if (isAlive) {
+    if (device.loggedOffline) {
+      db.logs.unshift({
+        id: Date.now() + Math.random(),
+        deviceName: device.name,
+        deviceIp: device.ip,
+        timestamp: now,
+        type: 'recovery',
+        message: 'Uređaj je ponovo dostupan i radi normalno.',
+        isRead: false,
+      });
+    }
+    device.offlineSince = null;
+    device.loggedOffline = false;
+    device.latency = `${Math.max(1, Math.round(responseTime || 2))} ms`;
+  } else {
+    if (!device.offlineSince) device.offlineSince = now;
+    if (now - device.offlineSince >= 10 * 60 * 1000 && !device.loggedOffline) {
+      db.logs.unshift({
+        id: Date.now() + Math.random(),
+        deviceName: device.name,
+        deviceIp: device.ip,
+        timestamp: now,
+        type: 'error',
+        message: 'Uređaj ne odgovara duže od 10 minuta.',
+        isRead: false,
+      });
+      device.loggedOffline = true;
+    }
+    device.latency = '-';
+  }
+
+  device.status = nextStatus;
+  return statusChanged;
+}
+
 // DNEVNI AUTOMATSKI BEKAP (Sa brisanjem starijih od 14 dana)
 function manageDailyBackup() {
   const now = new Date();
@@ -416,9 +496,34 @@ function checkPort(port: number, ip: string, timeout = 400): Promise<boolean> {
   });
 }
 
-// Quick ping probe using ICMP if available, with TCP socket fallback
+function isValidIPv4(ip: string): boolean {
+  const parts = ip.trim().split('.');
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255;
+  });
+}
+
+function normalizeSubnetBase(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const cleaned = input.trim().replace(/\/24$/, '');
+  const parts = cleaned.split('.');
+
+  if (parts.length === 4) {
+    return isValidIPv4(cleaned) ? parts.slice(0, 3).join('.') : null;
+  }
+  if (parts.length !== 3) return null;
+  if (!parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255)) {
+    return null;
+  }
+  return parts.join('.');
+}
+
+// Quick ping probe using ICMP if available, with real TCP socket fallback.
 async function probeHost(ip: string, timeoutSec = 1): Promise<{ alive: boolean; time: number }> {
-  // If IP is localhost or local range
+  if (!isValidIPv4(ip)) return { alive: false, time: 0 };
+
   const isWindows = process.platform === 'win32';
   const pingCmd = isWindows
     ? `ping -n 1 -w ${timeoutSec * 1000} ${ip}`
@@ -426,94 +531,79 @@ async function probeHost(ip: string, timeoutSec = 1): Promise<{ alive: boolean; 
 
   return new Promise((resolve) => {
     const start = Date.now();
-    exec(pingCmd, (error, stdout) => {
+    exec(pingCmd, { timeout: timeoutSec * 1000 + 500 }, (error, stdout) => {
       const elapsed = Date.now() - start;
       if (!error) {
         let time = elapsed;
         const timeMatch = isWindows
           ? stdout.match(/time[=<](\d+)ms/i)
           : stdout.match(/time=(\d+(?:\.\d+)?)\s*ms/i);
-        if (timeMatch && timeMatch[1]) {
-          time = parseFloat(timeMatch[1]);
-        }
+        if (timeMatch && timeMatch[1]) time = parseFloat(timeMatch[1]);
         return resolve({ alive: true, time });
       }
 
-      // Check common open ports as fallback (80, 443, 445, 135, 22, 9100)
-      checkPort(80, ip, 350).then((is80) => {
-        if (is80) return resolve({ alive: true, time: 2 });
-        checkPort(445, ip, 350).then((is445) => {
-          if (is445) return resolve({ alive: true, time: 3 });
-          
-          // In isolated/preview container where physical intranet switches aren't routed to internet,
-          // maintain the online state of devices that are not marked offline
-          const known = db.devices.find((d) => d.ip === ip);
-          if (known && known.status === 'ONLINE' && !known.loggedOffline) {
-            return resolve({ alive: true, time: Math.floor(Math.random() * 3) + 2 });
-          }
-          resolve({ alive: false, time: 0 });
-        });
-      });
+      // ICMP je cesto blokiran, pa proveravamo stvarne TCP servise.
+      void (async () => {
+        if (await checkPort(80, ip, 350)) return resolve({ alive: true, time: 2 });
+        if (await checkPort(445, ip, 350)) return resolve({ alive: true, time: 3 });
+        resolve({ alive: false, time: 0 });
+      })().catch(() => resolve({ alive: false, time: 0 }));
     });
   });
 }
 
-// Background monitor interval
-setInterval(async () => {
-  const now = Date.now();
-  for (const device of db.devices) {
-    try {
-      const res = await probeHost(device.ip, 1);
-      const isAlive = res.alive;
-      const newStatus = isAlive ? 'ONLINE' : 'OFFLINE';
+// Ručna i pozadinska provera istog uređaja dele jedan mrežni upit.
+const activeDeviceProbes = new Map<string, ReturnType<typeof probeHost>>();
+async function probeDevice(device: Device): Promise<{ alive: boolean; time: number }> {
+  const key = `${device.id}:${device.ip}`;
+  const existingProbe = activeDeviceProbes.get(key);
+  if (existingProbe) return existingProbe;
 
-      if (device.status !== newStatus && device.status !== 'UNKNOWN') {
-        device.statusSince = now;
-      }
-
-      if (isAlive) {
-        if (device.status === 'UNKNOWN') device.statusSince = now;
-        device.status = 'ONLINE';
-        device.latency = `${Math.round(res.time || 2)} ms`;
-
-        if (device.loggedOffline) {
-          db.logs.unshift({
-            id: Date.now() + Math.random(),
-            deviceName: device.name,
-            deviceIp: device.ip,
-            timestamp: now,
-            type: 'recovery',
-            message: 'Uređaj je ponovo dostupan i radi normalno.',
-            isRead: false,
-          });
-        }
-        device.offlineSince = null;
-        device.loggedOffline = false;
-      } else {
-        if (device.status === 'UNKNOWN') device.statusSince = now;
-        device.status = 'OFFLINE';
-        device.latency = '-';
-        if (!device.offlineSince) {
-          device.offlineSince = now;
-        } else if (now - device.offlineSince >= 10 * 60 * 1000 && !device.loggedOffline) {
-          db.logs.unshift({
-            id: Date.now() + Math.random(),
-            deviceName: device.name,
-            deviceIp: device.ip,
-            timestamp: now,
-            type: 'error',
-            message: 'Uređaj ne odgovara duže od 10 minuta.',
-            isRead: false,
-          });
-          device.loggedOffline = true;
-        }
-      }
-    } catch {
-      // Ignored
-    }
+  const probePromise = probeHost(device.ip, 1);
+  activeDeviceProbes.set(key, probePromise);
+  try {
+    return await probePromise;
+  } finally {
+    if (activeDeviceProbes.get(key) === probePromise) activeDeviceProbes.delete(key);
   }
-  saveDB();
-}, 60 * 1000);
+}
+
+async function refreshDeviceStatus(device: Device): Promise<void> {
+  const checkedIp = device.ip;
+  try {
+    const result = await probeDevice(device);
+    // Ako je administrator u medjuvremenu promenio IP, star rezultat se odbacuje.
+    if (device.ip === checkedIp) updateDeviceStatus(device, result.alive, result.time);
+  } catch {
+    if (device.ip === checkedIp) updateDeviceStatus(device, false);
+  }
+}
+
+let isMonitorRunning = false;
+async function monitorDevices() {
+  if (isMonitorRunning) return;
+  isMonitorRunning = true;
+
+  try {
+    for (const device of db.devices) {
+      await refreshDeviceStatus(device);
+    }
+    saveDB();
+  } finally {
+    isMonitorRunning = false;
+  }
+}
+
+if (process.env.NET_SCAN_DISABLE_MONITOR !== 'true') {
+  const initialMonitor = setTimeout(() => {
+    monitorDevices().catch((error) => console.error('[MONITOR] Greška pri početnoj proveri:', error));
+  }, 5000);
+  initialMonitor.unref();
+
+  setInterval(() => {
+    monitorDevices().catch((error) => console.error('[MONITOR] Greška pri proveri uređaja:', error));
+  }, 60 * 1000);
+}
 
 // Helper function to extract and normalize client IP
 function getClientIp(req: express.Request): string {
@@ -634,16 +724,22 @@ app.get('/api/devices', (req, res) => {
 
 app.post('/api/devices', async (req, res) => {
   let { ip, location, name, type } = req.body;
+  ip = typeof ip === 'string' ? ip.trim() : '';
   if (!ip) return res.status(400).json({ error: 'IP je obavezna' });
-  if (!location) location = 'Nedodeljeno';
-  if (!name || name.trim() === '') name = `Switch ${ip}`;
-  if (!type) type = 'Switch';
+  if (!isValidIPv4(ip)) return res.status(400).json({ error: 'Unesite ispravnu IPv4 adresu' });
+  if (db.devices.some((device) => device.ip === ip)) {
+    return res.status(409).json({ error: 'Uređaj sa tom IP adresom već postoji' });
+  }
+
+  location = typeof location === 'string' && location.trim() ? location.trim() : 'Nedodeljeno';
+  name = typeof name === 'string' && name.trim() ? name.trim() : `Uređaj ${ip}`;
+  type = typeof type === 'string' && type.trim() ? type.trim() : 'Računar';
 
   const newDevice: Device = {
     id: Date.now(),
-    name: name.trim(),
-    ip: ip.trim(),
-    location: location.trim(),
+    name,
+    ip,
+    location,
     type,
     status: 'UNKNOWN',
     latency: '-',
@@ -673,11 +769,27 @@ app.put('/api/devices/:id', (req, res) => {
   const oldName = db.devices[idx].name;
   const oldIp = db.devices[idx].ip;
 
-  if (ip) db.devices[idx].ip = ip.trim();
-  if (location) db.devices[idx].location = location.trim();
-  if (name) db.devices[idx].name = name.trim();
-  if (type) db.devices[idx].type = type.trim();
-  if (mac !== undefined) db.devices[idx].mac = mac.trim();
+  if (ip !== undefined) {
+    if (typeof ip !== 'string' || !isValidIPv4(ip.trim())) {
+      return res.status(400).json({ error: 'Unesite ispravnu IPv4 adresu' });
+    }
+    const nextIp = ip.trim();
+    if (db.devices.some((device, deviceIdx) => deviceIdx !== idx && device.ip === nextIp)) {
+      return res.status(409).json({ error: 'Drugi uređaj već koristi tu IP adresu' });
+    }
+    db.devices[idx].ip = nextIp;
+    if (nextIp !== oldIp) {
+      db.devices[idx].status = 'UNKNOWN';
+      db.devices[idx].latency = '-';
+      db.devices[idx].statusSince = Date.now();
+      db.devices[idx].offlineSince = null;
+      db.devices[idx].loggedOffline = false;
+    }
+  }
+  if (typeof location === 'string' && location.trim()) db.devices[idx].location = location.trim();
+  if (typeof name === 'string' && name.trim()) db.devices[idx].name = name.trim();
+  if (typeof type === 'string' && type.trim()) db.devices[idx].type = type.trim();
+  if (typeof mac === 'string') db.devices[idx].mac = mac.trim();
 
   saveDB();
   const author = (req.headers['x-user'] as string) || req.body.author || 'Admin';
@@ -720,6 +832,8 @@ app.post('/api/devices/import', (req, res) => {
   }
 
   importedDevices.forEach((d) => {
+    if (!d || typeof d.ip !== 'string' || !isValidIPv4(d.ip.trim())) return;
+    d.ip = d.ip.trim();
     const existing = db.devices.find((existing) => existing.ip === d.ip);
     if (!existing) {
       db.devices.push({
@@ -748,15 +862,7 @@ app.post('/api/devices/import', (req, res) => {
 // Scan all devices
 app.post('/api/scan', async (req, res) => {
   for (const device of db.devices) {
-    try {
-      const probe = await probeHost(device.ip, 1);
-      device.status = probe.alive ? 'ONLINE' : 'OFFLINE';
-      device.latency = probe.alive ? `${Math.round(probe.time || 2)} ms` : '-';
-      if (!device.statusSince) device.statusSince = Date.now();
-    } catch {
-      device.status = 'OFFLINE';
-      device.latency = '-';
-    }
+    await refreshDeviceStatus(device);
   }
   saveDB();
   res.json(db.devices);
@@ -768,33 +874,25 @@ app.post('/api/scan/:id', async (req, res) => {
   const device = db.devices.find((d) => d.id === id);
   if (!device) return res.status(404).json({ error: 'Nije pronađen' });
 
-  const probe = await probeHost(device.ip, 1);
-  device.status = probe.alive ? 'ONLINE' : 'OFFLINE';
-  device.latency = probe.alive ? `${Math.round(probe.time || 2)} ms` : '-';
+  await refreshDeviceStatus(device);
   saveDB();
   res.json(device);
 });
 
-// Subnet network for switch (0-255)
-app.get('/api/switch/:id/network', async (req, res) => {
+// Subnet network for switch (0-255). GET samo cita kes; skeniranje je POST/SSE.
+app.get('/api/switch/:id/network', (req, res) => {
   const id = String(req.params.id);
-  let rawData = db.switchNetworks[id];
-  
-  // If not generated yet, auto scan full 256 addresses right away
-  if (!rawData || rawData.length === 0) {
-    const numId = Number(id);
-    const device = db.devices.find((d) => d.id === numId) || db.devices[0];
-    const baseIp = device ? device.ip.split('.').slice(0, 3).join('.') : '11.29.50';
-    rawData = await scanSubnetReal(baseIp, device);
-  }
-
+  const switchDevice = db.devices.find((device) => String(device.id) === id);
+  const baseIp = switchDevice ? normalizeSubnetBase(switchDevice.ip) : null;
+  const rawData = db.switchNetworks[id] || (baseIp ? db.switchNetworks[baseIp] : null) || [];
   const enriched = rawData.map((d) => ({
     ...d,
     customLabel: db.customLabels[d.ip] || '',
   }));
   res.json({
+    baseIp,
     data: enriched,
-    lastScan: db.switchScanTimes[id] || Date.now(),
+    lastScan: db.switchScanTimes[id] || (baseIp ? db.switchScanTimes[baseIp] : null) || null,
   });
 });
 
@@ -863,11 +961,15 @@ function getDetectedSubnets(): string[] {
 }
 
 // Live concurrent scanner for all 256 addresses (0 to 255)
-async function scanSubnetReal(
+async function performSubnetScan(
   targetBase: string,
   switchDevice?: Device,
-  onProgress?: (progress: { percent: number; scanned: number; total: number; activeCount: number; currentItem?: SubnetDevice }) => void
+  onProgress?: (progress: SubnetScanProgress) => void
 ): Promise<SubnetDevice[]> {
+  const normalizedBase = normalizeSubnetBase(targetBase);
+  if (!normalizedBase) throw new Error('Neispravna /24 podmreža');
+  targetBase = normalizedBase;
+
   const hostIps = getLocalHostIps();
   const arpMap = await getArpTable();
   const results: SubnetDevice[] = [];
@@ -900,24 +1002,19 @@ async function scanSubnetReal(
     let hostname = known?.name || prev?.hostname || '-';
     let type = known?.type || prev?.type || '-';
 
+    if (isSwitchIp && switchDevice) {
+      hostname = switchDevice.name;
+      mac = switchDevice.mac || mac;
+      type = 'Switch';
+    }
+
     if (isHost) {
       isOnline = true;
       latency = '<1 ms';
       hostname = os.hostname() || 'Glavni Server (Host)';
       type = 'Server';
-    } else if (isSwitchIp) {
-      isOnline = switchDevice.status === 'ONLINE';
-      latency = switchDevice.latency || '2 ms';
-      hostname = switchDevice.name;
-      mac = switchDevice.mac || mac;
-      type = 'Switch';
-    } else if (known && known.status === 'ONLINE') {
-      isOnline = true;
-      latency = known.latency || '2 ms';
-      hostname = known.name;
-      mac = known.mac || mac;
-      type = known.type;
     } else {
+      // Svaka adresa se stvarno proverava; stari ONLINE status nije dokaz da je IP zauzet.
       // Live probe via socket + ping
       const probeRes = await new Promise<{ alive: boolean; latency: number }>((resolve) => {
         let settled = false;
@@ -929,7 +1026,7 @@ async function scanSubnetReal(
             ? `ping -n 1 -w 200 ${ip}`
             : `ping -c 1 -W 0.3 ${ip}`;
 
-          exec(pingCmd, (err, stdout) => {
+          exec(pingCmd, { timeout: 1000 }, (err, stdout) => {
             if (settled) return;
             if (!err) {
               settled = true;
@@ -972,10 +1069,6 @@ async function scanSubnetReal(
         if (mac === '-' && arpMap.has(ip)) {
           mac = arpMap.get(ip)!;
         }
-      } else if (prev && prev.status === 'ONLINE' && Date.now() - (prev.lastSeenOnline || 0) < 60000) {
-        // Keep online if recently active
-        isOnline = true;
-        latency = prev.latency || '3 ms';
       }
     }
 
@@ -1030,21 +1123,46 @@ async function scanSubnetReal(
         scanned: scannedSoFar,
         total: 256,
         activeCount,
-        currentItem: chunkResults[chunkResults.length - 1],
+        items: chunkResults,
       });
     }
   }
 
-  // Cache in DB
+  // Vreme zavrsetka, ne pocetka skeniranja.
+  const completedAt = Date.now();
   db.switchNetworks[targetBase] = results;
-  db.switchScanTimes[targetBase] = now;
+  db.switchScanTimes[targetBase] = completedAt;
   if (switchDevice) {
     db.switchNetworks[String(switchDevice.id)] = results;
-    db.switchScanTimes[String(switchDevice.id)] = now;
+    db.switchScanTimes[String(switchDevice.id)] = completedAt;
   }
   saveDB();
 
   return results;
+}
+
+// Ako vise korisnika pokrene istu /24 proveru, svi cekaju jedan stvarni scan.
+const activeSubnetScans = new Map<string, Promise<SubnetDevice[]>>();
+async function scanSubnetReal(
+  targetBase: string,
+  switchDevice?: Device,
+  onProgress?: (progress: SubnetScanProgress) => void
+): Promise<SubnetDevice[]> {
+  const normalizedBase = normalizeSubnetBase(targetBase);
+  if (!normalizedBase) throw new Error('Neispravna /24 podmreža');
+
+  const existingScan = activeSubnetScans.get(normalizedBase);
+  if (existingScan) return existingScan;
+
+  const scanPromise = performSubnetScan(normalizedBase, switchDevice, onProgress);
+  activeSubnetScans.set(normalizedBase, scanPromise);
+  try {
+    return await scanPromise;
+  } finally {
+    if (activeSubnetScans.get(normalizedBase) === scanPromise) {
+      activeSubnetScans.delete(normalizedBase);
+    }
+  }
 }
 
 // 1. Get detected network subnets from local host interfaces and database
@@ -1058,142 +1176,155 @@ app.get('/api/network/subnets', (req, res) => {
 
 // 2. Scan switch subnet (POST)
 app.post('/api/switch/:id/network', async (req, res) => {
-  const id = Number(req.params.id);
-  const device = db.devices.find((d) => d.id === id);
-  if (!device) return res.status(404).json({ error: 'Switch nije pronađen' });
+  try {
+    const id = Number(req.params.id);
+    const device = db.devices.find((d) => d.id === id);
+    if (!device) return res.status(404).json({ error: 'Switch nije pronađen' });
 
-  const parts = device.ip.split('.');
-  if (parts.length < 3) return res.status(400).json({ error: 'Neispravan IP opseg' });
-  const baseIp = `${parts[0]}.${parts[1]}.${parts[2]}`;
+    const baseIp = normalizeSubnetBase(device.ip);
+    if (!baseIp) return res.status(400).json({ error: 'Neispravan IP opseg' });
 
-  const results = await scanSubnetReal(baseIp, device);
-  const now = Date.now();
+    const results = await scanSubnetReal(baseIp, device);
+    const author = (req.headers['x-user'] as string) || 'Admin';
+    const clientIp = getClientIp(req);
+    logActivity(
+      author,
+      clientIp,
+      'SKENIRANJE_PODMREŽE',
+      'network',
+      `Skenirano svih 256 adresa za switch "${device.name}" (${baseIp}.0/24). Pronađeno: ${results.filter(r => r.status === 'ONLINE').length} aktivnih uređaja.`
+    );
 
-  const author = (req.headers['x-user'] as string) || 'Admin';
-  const clientIp = getClientIp(req);
-  logActivity(
-    author,
-    clientIp,
-    'SKENIRANJE_PODMREŽE',
-    'network',
-    `Skenirano svih 256 adresa za switch "${device.name}" (${baseIp}.0/24). Pronađeno: ${results.filter(r => r.status === 'ONLINE').length} aktivnih uređaja.`
-  );
-
-  res.json({
-    data: results,
-    lastScan: now,
-  });
+    res.json({
+      baseIp,
+      data: results,
+      lastScan: db.switchScanTimes[String(device.id)] || db.switchScanTimes[baseIp],
+      totalAddresses: 256,
+    });
+  } catch (error) {
+    console.error('[SCAN] Greška pri skeniranju switch podmreže:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Skeniranje podmreže nije uspelo' });
+  }
 });
 
-// 3. Generic Subnet Scanner API (Supports GET or POST for any subnet: 11.29.50, 192.168.1, 10.10.1, etc.)
-app.get('/api/scan-subnet', async (req, res) => {
+// 3. Generic Subnet Scanner API (GET = kes, POST = novo skeniranje)
+app.get('/api/scan-subnet', (req, res) => {
   const subnetQuery = (req.query.subnet as string) || (req.query.baseIp as string) || '11.29.50';
-  let targetBase = subnetQuery.trim().replace(/\/24$/, '').replace(/\/16$/, '');
-  const parts = targetBase.split('.');
-  if (parts.length >= 3) {
-    targetBase = `${parts[0]}.${parts[1]}.${parts[2]}`;
-  } else {
-    targetBase = '11.29.50';
-  }
+  const targetBase = normalizeSubnetBase(subnetQuery);
+  if (!targetBase) return res.status(400).json({ error: 'Neispravan /24 opseg. Primer: 192.168.1' });
 
-  // Return cached if available, otherwise scan
-  let results = db.switchNetworks[targetBase];
-  if (!results || results.length === 0) {
-    const matchingSwitch = db.devices.find((d) => d.ip.startsWith(targetBase) && d.type === 'Switch');
-    results = await scanSubnetReal(targetBase, matchingSwitch);
-  }
-
+  const results = (db.switchNetworks[targetBase] || []).map((device) => ({
+    ...device,
+    customLabel: db.customLabels[device.ip] || '',
+  }));
   res.json({
     baseIp: targetBase,
     data: results,
-    lastScan: db.switchScanTimes[targetBase] || Date.now(),
+    lastScan: db.switchScanTimes[targetBase] || null,
+    isScanning: activeSubnetScans.has(targetBase),
+    totalAddresses: 256,
   });
 });
 
 app.post('/api/scan-subnet', async (req, res) => {
-  const { subnet, baseIp: rawBase } = req.body;
-  let targetBase = (subnet || rawBase || '11.29.50').trim().replace(/\/24$/, '').replace(/\/16$/, '');
-  const parts = targetBase.split('.');
-  if (parts.length >= 3) {
-    targetBase = `${parts[0]}.${parts[1]}.${parts[2]}`;
-  } else {
-    targetBase = '11.29.50';
+  try {
+    const { subnet, baseIp: rawBase } = req.body;
+    const targetBase = normalizeSubnetBase(subnet || rawBase || '11.29.50');
+    if (!targetBase) return res.status(400).json({ error: 'Neispravan /24 opseg. Primer: 192.168.1' });
+
+    const matchingSwitch = db.devices.find((d) => d.ip.startsWith(`${targetBase}.`) && d.type === 'Switch');
+    const results = await scanSubnetReal(targetBase, matchingSwitch);
+    const clientIp = getClientIp(req);
+    const author = (req.headers['x-user'] as string) || 'Admin';
+
+    logActivity(
+      author,
+      clientIp,
+      'SKENIRANJE_PODMREŽE',
+      'network',
+      `Završeno uživo skeniranje svih 256 adresa za podmrežu ${targetBase}.0/24. Aktivnih: ${results.filter(r => r.status === 'ONLINE').length}`
+    );
+
+    res.json({
+      baseIp: targetBase,
+      data: results,
+      lastScan: db.switchScanTimes[targetBase],
+      totalAddresses: 256,
+    });
+  } catch (error) {
+    console.error('[SCAN] Greška pri skeniranju podmreže:', error);
+    if (!res.headersSent) res.status(500).json({ error: 'Skeniranje podmreže nije uspelo' });
   }
-
-  const matchingSwitch = db.devices.find((d) => d.ip.startsWith(targetBase) && d.type === 'Switch');
-  const results = await scanSubnetReal(targetBase, matchingSwitch);
-  const now = Date.now();
-  const clientIp = getClientIp(req);
-  const author = (req.headers['x-user'] as string) || 'Admin';
-
-  logActivity(
-    author,
-    clientIp,
-    'SKENIRANJE_PODMREŽE',
-    'network',
-    `Završeno uživo skeniranje svih 256 adresa za podmrežu ${targetBase}.0/24. Aktivnih: ${results.filter(r => r.status === 'ONLINE').length}`
-  );
-
-  res.json({
-    baseIp: targetBase,
-    data: results,
-    lastScan: now,
-  });
 });
 
 // 4. Server-Sent Events (SSE) Stream for Live Subnet Scanner Progress
 app.get('/api/scan-subnet-stream', async (req, res) => {
+  const targetBase = normalizeSubnetBase((req.query.subnet as string) || '11.29.50');
+  if (!targetBase) return res.status(400).json({ error: 'Neispravan /24 opseg. Primer: 192.168.1' });
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
-  const subnet = ((req.query.subnet as string) || '11.29.50').trim().replace(/\/24$/, '');
-  const parts = subnet.split('.');
-  const targetBase = parts.length >= 3 ? `${parts[0]}.${parts[1]}.${parts[2]}` : '11.29.50';
+  const writeEvent = (payload: object) => {
+    if (!res.destroyed && !res.writableEnded) {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    }
+  };
+  const keepAlive = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n');
+  }, 15000);
 
-  const author = (req.headers['x-user'] as string) || 'Korisnik';
-  const clientIp = getClientIp(req);
+  try {
+    const author = (req.headers['x-user'] as string) || 'Korisnik';
+    const clientIp = getClientIp(req);
+    logActivity(
+      author,
+      clientIp,
+      'SKENIRANJE_PODMREŽE',
+      'network',
+      `Pokrenuto uživo skeniranje (0 - 255) za podmrežu ${targetBase}.0/24`
+    );
 
-  logActivity(
-    author,
-    clientIp,
-    'SKENIRANJE_PODMREŽE',
-    'network',
-    `Pokrenuto uživo skeniranje (0 - 255) za podmrežu ${targetBase}.0/24`
-  );
+    const matchingSwitch = db.devices.find((d) => d.ip.startsWith(`${targetBase}.`) && d.type === 'Switch');
+    const results = await scanSubnetReal(targetBase, matchingSwitch, (progress) => {
+      writeEvent({ type: 'progress', ...progress });
+    });
 
-  const matchingSwitch = db.devices.find((d) => d.ip.startsWith(targetBase) && d.type === 'Switch');
-
-  const results = await scanSubnetReal(targetBase, matchingSwitch, (progress) => {
-    res.write(`data: ${JSON.stringify({ type: 'progress', ...progress })}\n\n`);
-  });
-
-  res.write(
-    `data: ${JSON.stringify({
+    writeEvent({
       type: 'done',
       baseIp: targetBase,
       data: results,
-      lastScan: Date.now(),
-    })}\n\n`
-  );
-  res.end();
+      lastScan: db.switchScanTimes[targetBase],
+      totalAddresses: 256,
+    });
+  } catch (error) {
+    console.error('[SCAN] Greška u SSE skeniranju:', error);
+    writeEvent({ type: 'error', error: 'Skeniranje podmreže nije uspelo' });
+  } finally {
+    clearInterval(keepAlive);
+    if (!res.writableEnded) res.end();
+  }
 });
 
 
 // Custom Port Labels
 app.post('/api/labels', (req, res) => {
-  const { ip, label } = req.body;
-  if (!ip) return res.status(400).json({ error: 'IP je obavezna' });
-  if (label && label.trim() !== '') {
-    db.customLabels[ip] = label.trim();
+  const { ip, label: rawLabel } = req.body;
+  const normalizedIp = typeof ip === 'string' ? ip.trim() : '';
+  const label = typeof rawLabel === 'string' ? rawLabel.trim() : '';
+  if (!isValidIPv4(normalizedIp)) return res.status(400).json({ error: 'Unesite ispravnu IPv4 adresu' });
+  if (label) {
+    db.customLabels[normalizedIp] = label;
   } else {
-    delete db.customLabels[ip];
+    delete db.customLabels[normalizedIp];
   }
   const author = (req.headers['x-user'] as string) || 'Korisnik';
   const clientIp = getClientIp(req);
-  logActivity(author, clientIp, 'IZMENA_OZNAKE_PORTA', 'network', `Oznaka za port ${ip}: "${label || ''}"`);
+  logActivity(author, clientIp, 'IZMENA_OZNAKE_PORTA', 'network', `Oznaka za port ${normalizedIp}: "${label}"`);
   saveDB();
-  res.json({ success: true, ip, label: db.customLabels[ip] || '' });
+  res.json({ success: true, ip: normalizedIp, label: db.customLabels[normalizedIp] || '' });
 });
 
 // Logs

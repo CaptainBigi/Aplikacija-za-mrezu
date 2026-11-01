@@ -67,7 +67,7 @@ export const DeviceModal: React.FC<DeviceModalProps> = ({
       onClose();
     } catch (e) {
       console.error(e);
-      alert('Greška pri čuvanju');
+      alert(e instanceof Error ? e.message : 'Greška pri čuvanju');
     } finally {
       setIsSaving(false);
     }

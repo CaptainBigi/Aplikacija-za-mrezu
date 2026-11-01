@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Send, MessageSquare, User, ShieldCheck, RefreshCw, Radio } from 'lucide-react';
+import { X, Send, MessageSquare, User, ShieldCheck, RefreshCw, Radio, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { ChatMessage } from '../types';
 
 interface ChatModalProps {
@@ -154,6 +154,30 @@ export const ChatModal: React.FC<ChatModalProps> = ({
               const timeStr = date.toLocaleTimeString('sr-RS', { hour: '2-digit', minute: '2-digit' });
               const dateStr = date.toLocaleDateString('sr-RS');
               const displayName = c.assignedName || c.user;
+
+              if (c.kind === 'system') {
+                const isOffline = c.eventType === 'offline';
+                return (
+                  <div key={c.id} className="flex justify-center py-1">
+                    <div
+                      className={`w-full max-w-[95%] rounded-xl border px-3.5 py-2.5 text-xs shadow-md ${
+                        isOffline
+                          ? 'bg-red-950/40 border-red-500/40 text-red-100'
+                          : 'bg-emerald-950/40 border-emerald-500/40 text-emerald-100'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3 mb-1">
+                        <span className={`flex items-center gap-1.5 font-bold ${isOffline ? 'text-red-400' : 'text-emerald-400'}`}>
+                          {isOffline ? <AlertTriangle className="w-3.5 h-3.5" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                          NET-SCAN sistemsko obaveštenje
+                        </span>
+                        <span className="text-[9px] text-gray-500 font-mono whitespace-nowrap">{dateStr} {timeStr}</span>
+                      </div>
+                      <div className="leading-relaxed font-semibold">{c.message}</div>
+                    </div>
+                  </div>
+                );
+              }
 
               return (
                 <div

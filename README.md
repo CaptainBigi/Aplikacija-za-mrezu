@@ -2,6 +2,13 @@
 
 Aplikacija za nadzor lokalne/offline mreže, sa mapama zgrada, web terminalom, skenerom podmreža i oglasnom tablom.
 
+## Nadzor i mrežni skener
+
+- Stvarne ONLINE/OFFLINE promene automatski se objavljuju kao sistemske poruke na oglasnoj tabli, bez duplikata pri ponovnoj proveri istog statusa.
+- Server proverava uređaje 5 sekundi nakon pokretanja i zatim na svakih 60 sekundi.
+- Skener prikazuje vreme poslednjeg završenog skeniranja i mapu svih 256 adresa: zeleno je zauzeto, sivo slobodno, a tamno neprovereno.
+- Automatsko skeniranje podmreže može da se uključi na 1, 5 ili 15 minuta; podrazumevano je isključeno.
+
 ## Pokretanje na Windowsu (preporučeno)
 
 1. Raspakujte **kompletan** `NET-SCAN-OFFLINE.zip` u običan folder, na primer `C:\NET-SCAN` ili `Desktop\NET-SCAN`.

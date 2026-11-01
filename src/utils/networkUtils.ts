@@ -120,17 +120,20 @@ export function parseTerminalCommand(commandText: string): {
  */
 export function parseSubnetInput(input: string): string {
   if (!input) return '11.29.50';
-  const cleaned = input.trim().replace(/\/24$/, '').replace(/\/16$/, '');
+  const cleaned = input.trim().replace(/\/24$/, '');
   const parts = cleaned.split('.');
-  if (parts.length >= 3) {
-    const p0 = Number(parts[0]);
-    const p1 = Number(parts[1]);
-    const p2 = Number(parts[2]);
-    if (!isNaN(p0) && !isNaN(p1) && !isNaN(p2) && p0 >= 0 && p0 <= 255 && p1 >= 0 && p1 <= 255 && p2 >= 0 && p2 <= 255) {
-      return `${p0}.${p1}.${p2}`;
-    }
+
+  if (parts.length === 4) {
+    return isValidIpv4(cleaned) ? parts.slice(0, 3).map(Number).join('.') : '';
   }
-  return '11.29.50';
+  if (parts.length === 3 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255;
+  })) {
+    return parts.map(Number).join('.');
+  }
+  return '';
 }
 
 export interface SubnetDeviceItem {

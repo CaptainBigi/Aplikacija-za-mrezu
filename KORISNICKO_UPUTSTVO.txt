@@ -78,6 +78,14 @@ Sada je vas racunar zvanicno Mrezni Server! Svi iz mreze koji su povezani sa vam
 - Bez tokena ili sa pogresnim tokenom server vraca HTTP 401.
 - Za drugi token postavite WIDGET_API_KEY u okruzenju pre pokretanja servera.
 
+8. STATUS UREĐAJA I MREZNI SKENER:
+- Kada uredjaj stvarno predje iz ONLINE u OFFLINE (ili se oporavi), NET-SCAN odmah upisuje sistemsku poruku na Oglasnu tablu.
+- Pozadinska provera se pokrece 5 sekundi nakon starta servera, a zatim na svakih 60 sekundi. Rucno Skeniraj koristi istu logiku.
+- Mrezni skener prikazuje vreme zavrsetka poslednjeg skeniranja i mapu svih 256 adresa: zeleno = zauzeto, sivo = slobodno, tamno = nije provereno.
+- GET ucitavanje skenera samo cita sacuvane rezultate. Novo skeniranje se pokrece dugmetom Skeniraj.
+- Opciono automatsko skeniranje moze da se podesi na 1, 5 ili 15 minuta; podrazumevano je iskljuceno.
+- Ako vise korisnika pokrene istu /24 proveru, server ne duplira posao nego deli isti rezultat.
+
 Napravljeno specijalno za sigurne (offline) mreze.
 Created by N1ko7a
 =========================================================

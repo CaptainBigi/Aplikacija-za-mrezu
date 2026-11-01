@@ -47,6 +47,10 @@ export interface ChatMessage {
   timestamp: number;
   ip?: string;
   assignedName?: string;
+  kind?: 'system';
+  eventType?: 'offline' | 'online';
+  deviceId?: number;
+  deviceIp?: string;
 }
 
 export interface ClientSession {

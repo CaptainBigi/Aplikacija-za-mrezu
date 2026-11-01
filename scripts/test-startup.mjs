@@ -11,11 +11,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-function makeStandaloneCopy() {
+function makeStandaloneCopy(customizeData) {
   // Znak & u putanji pokriva uobicajeni naziv raspakovanog ZIP foldera.
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'net-scan-&-startup-'));
   for (const file of ['server.js', 'package.json', 'data.json', 'netscan-data.json']) {
     fs.copyFileSync(path.join(ROOT, file), path.join(directory, file));
+  }
+  if (customizeData) {
+    for (const file of ['data.json', 'netscan-data.json']) {
+      const filePath = path.join(directory, file);
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      customizeData(data);
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    }
   }
   fs.cpSync(path.join(ROOT, 'dist'), path.join(directory, 'dist'), { recursive: true });
   return directory;
@@ -40,6 +48,7 @@ function launch(directory, port) {
       ...process.env,
       PORT: String(port),
       NET_SCAN_OPEN_BROWSER: 'false',
+      NET_SCAN_DISABLE_MONITOR: 'true',
       WIDGET_API_KEY: 'moj_tajni_token_123',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -114,6 +123,16 @@ test('standalone paket se pokrece i servira API i web interfejs', { timeout: 150
     const devices = await devicesResponse.json();
     assert.ok(Array.isArray(devices));
 
+    // GET ne sme automatski da skenira; nepoznata mreza nema lazni timestamp.
+    const cachedSubnetResponse = await fetch(`http://127.0.0.1:${port}/api/scan-subnet?subnet=198.51.100`);
+    assert.equal(cachedSubnetResponse.status, 200);
+    const cachedSubnet = await cachedSubnetResponse.json();
+    assert.deepEqual(cachedSubnet.data, []);
+    assert.equal(cachedSubnet.lastScan, null);
+
+    const invalidSubnetResponse = await fetch(`http://127.0.0.1:${port}/api/scan-subnet?subnet=${encodeURIComponent('192.168.1/16')}`);
+    assert.equal(invalidSubnetResponse.status, 400);
+
     const widgetUrl = `http://127.0.0.1:${port}/api/widget-stats`;
     const missingKeyResponse = await fetch(widgetUrl);
     assert.equal(missingKeyResponse.status, 401);
@@ -139,6 +158,75 @@ test('standalone paket se pokrece i servira API i web interfejs', { timeout: 150
     });
     assert.equal(preflightResponse.status, 200);
     assert.match(preflightResponse.headers.get('access-control-allow-headers') || '', /X-API-Key/i);
+  } finally {
+    await stop(child);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('stvarne promene statusa prave sistemske chat poruke bez duplikata', { timeout: 25000 }, async () => {
+  const now = Date.now();
+  const directory = makeStandaloneCopy((data) => {
+    data.chat = [];
+    data.logs = [];
+    data.devices = [
+      {
+        id: 9001,
+        name: 'Test Offline',
+        ip: '10.255.255.254',
+        location: 'Test',
+        type: 'Server',
+        status: 'ONLINE',
+        latency: '1 ms',
+        statusSince: now - 60000,
+        offlineSince: null,
+        loggedOffline: false,
+      },
+      {
+        id: 9002,
+        name: 'Test Recovery',
+        ip: '127.0.0.1',
+        location: 'Test',
+        type: 'Server',
+        status: 'OFFLINE',
+        latency: '-',
+        statusSince: now - 60000,
+        offlineSince: now - 60000,
+        loggedOffline: true,
+      },
+    ];
+  });
+  const port = await getFreePort();
+  const { child, output } = launch(directory, port);
+
+  try {
+    await waitForHealth(child, port, output);
+
+    const [offlineResponse, concurrentOfflineResponse] = await Promise.all([
+      fetch(`http://127.0.0.1:${port}/api/scan/9001`, { method: 'POST' }),
+      fetch(`http://127.0.0.1:${port}/api/scan/9001`, { method: 'POST' }),
+    ]);
+    assert.equal(offlineResponse.status, 200);
+    assert.equal(concurrentOfflineResponse.status, 200);
+    assert.equal((await offlineResponse.json()).status, 'OFFLINE');
+    assert.equal((await concurrentOfflineResponse.json()).status, 'OFFLINE');
+
+    const recoveryResponse = await fetch(`http://127.0.0.1:${port}/api/scan/9002`, { method: 'POST' });
+    assert.equal(recoveryResponse.status, 200);
+    assert.equal((await recoveryResponse.json()).status, 'ONLINE');
+
+    const chatResponse = await fetch(`http://127.0.0.1:${port}/api/chat`);
+    const chat = await chatResponse.json();
+    const systemMessages = chat.filter((message) => message.kind === 'system');
+    assert.equal(systemMessages.length, 2);
+    assert.ok(systemMessages.some((message) => message.deviceId === 9001 && message.eventType === 'offline'));
+    assert.ok(systemMessages.some((message) => message.deviceId === 9002 && message.eventType === 'online'));
+
+    // Ponovna provera istog statusa ne sme da napravi novu poruku.
+    await fetch(`http://127.0.0.1:${port}/api/scan/9001`, { method: 'POST' });
+    await fetch(`http://127.0.0.1:${port}/api/scan/9002`, { method: 'POST' });
+    const repeatedChat = await (await fetch(`http://127.0.0.1:${port}/api/chat`)).json();
+    assert.equal(repeatedChat.filter((message) => message.kind === 'system').length, 2);
   } finally {
     await stop(child);
     fs.rmSync(directory, { recursive: true, force: true });

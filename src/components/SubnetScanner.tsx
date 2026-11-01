@@ -66,6 +66,21 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
   const [addedIps, setAddedIps] = useState<Record<string, boolean>>({});
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const isScanningRef = useRef(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [lastScanDuration, setLastScanDuration] = useState<number | null>(null);
+  const [autoScanInterval, setAutoScanInterval] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('netscan_scanner_auto_interval'));
+    return [0, 60, 300, 900].includes(saved) ? saved : 0;
+  });
+
+  useEffect(() => {
+    isScanningRef.current = isScanning;
+  }, [isScanning]);
+
+  useEffect(() => () => {
+    eventSourceRef.current?.close();
+  }, []);
 
   // Fetch detected subnets on mount
   useEffect(() => {
@@ -89,43 +104,77 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
         loadSubnetData(base, selectedSwitch.id);
       }
     } else {
-      // Load current target subnet
       loadSubnetData(targetSubnet);
     }
   }, [selectedSwitch]);
 
   const loadSubnetData = async (base: string, switchId?: number) => {
     try {
-      const url = switchId ? `/api/switch/${switchId}/network` : `/api/scan-subnet`;
-      const res = switchId
-        ? await fetch(url)
-        : await fetch('/api/scan-subnet', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subnet: base }),
-          });
+      setScanError(null);
+      const url = switchId
+        ? `/api/switch/${switchId}/network`
+        : `/api/scan-subnet?subnet=${encodeURIComponent(base)}`;
+      const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
-      if (data.data) {
-        setSubnetData(data.data);
-        setLastScanTime(data.lastScan || Date.now());
-      }
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+      setSubnetData(Array.isArray(data.data) ? data.data : []);
+      setLastScanTime(typeof data.lastScan === 'number' ? data.lastScan : null);
     } catch (e) {
+      setScanError(e instanceof Error ? e.message : 'Učitavanje podmreže nije uspelo');
       console.error('Greška pri učitavanju podmreže:', e);
     }
   };
 
-  // Live real-time scan using Server-Sent Events (SSE) or POST fallback
+  const applyScanResult = (data: any, startedAt: number) => {
+    if (Array.isArray(data.data)) setSubnetData(data.data);
+    setLastScanTime(typeof data.lastScan === 'number' ? data.lastScan : null);
+    setLastScanDuration(Date.now() - startedAt);
+  };
+
+  const finishScanning = () => {
+    isScanningRef.current = false;
+    setIsScanning(false);
+  };
+
+  // Live real-time scan using Server-Sent Events (POST fallback samo bez SSE podrške).
   const handleStartLiveScan = async (baseToScan = targetSubnet) => {
+    if (isScanningRef.current) return;
+
     const cleanBase = parseSubnetInput(baseToScan);
+    if (!cleanBase) {
+      setScanError('Neispravan /24 opseg. Unesite npr. 192.168.1 ili 192.168.1.0/24.');
+      return;
+    }
+
+    const startedAt = Date.now();
     setTargetSubnet(cleanBase);
+    setSubnetData([]);
+    if (cleanBase !== targetSubnet) setLastScanTime(null);
+    setScanError(null);
+    isScanningRef.current = true;
     setIsScanning(true);
     setScanProgress({ percent: 0, scanned: 0, total: 256, activeCount: 0 });
 
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
+      eventSourceRef.current = null;
     }
 
     try {
+      if (typeof EventSource === 'undefined') {
+        const res = await fetch('/api/scan-subnet', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subnet: cleanBase }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        applyScanResult(data, startedAt);
+        finishScanning();
+        return;
+      }
+
       const sseUrl = `/api/scan-subnet-stream?subnet=${encodeURIComponent(cleanBase)}`;
       const es = new EventSource(sseUrl);
       eventSourceRef.current = es;
@@ -137,66 +186,72 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
             setScanProgress({
               percent: payload.percent,
               scanned: payload.scanned,
-              total: payload.total,
+              total: payload.total || 256,
               activeCount: payload.activeCount,
             });
-            if (payload.currentItem) {
+
+            const incomingItems = Array.isArray(payload.items)
+              ? payload.items
+              : payload.currentItem
+              ? [payload.currentItem]
+              : [];
+            if (incomingItems.length > 0) {
               setSubnetData((prev) => {
-                const exists = prev.findIndex((p) => p.ip === payload.currentItem.ip);
-                if (exists >= 0) {
-                  const updated = [...prev];
-                  updated[exists] = payload.currentItem;
-                  return updated;
-                }
-                return [...prev, payload.currentItem];
+                const byIp = new Map(prev.map((item) => [item.ip, item]));
+                incomingItems.forEach((item: SubnetDevice) => byIp.set(item.ip, item));
+                return Array.from(byIp.values()).sort((a, b) =>
+                  Number(a.ip.split('.').pop()) - Number(b.ip.split('.').pop())
+                );
               });
             }
           } else if (payload.type === 'done') {
-            if (payload.data) {
-              setSubnetData(payload.data);
-            }
-            setLastScanTime(payload.lastScan || Date.now());
-            setIsScanning(false);
+            applyScanResult(payload, startedAt);
+            setScanProgress((prev) => ({ ...prev, percent: 100, scanned: prev.total }));
+            finishScanning();
             es.close();
+            if (eventSourceRef.current === es) eventSourceRef.current = null;
+          } else if (payload.type === 'error') {
+            setScanError(payload.error || 'Skeniranje nije uspelo');
+            finishScanning();
+            es.close();
+            if (eventSourceRef.current === es) eventSourceRef.current = null;
           }
         } catch (err) {
           console.error('SSE parse error:', err);
         }
       };
 
-      es.onerror = async () => {
-        // Fallback to standard POST if SSE interrupted
+      es.onerror = () => {
+        if (eventSourceRef.current !== es) return;
         es.close();
-        try {
-          const res = await fetch('/api/scan-subnet', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subnet: cleanBase }),
-          });
-          const data = await res.json();
-          if (data.data) {
-            setSubnetData(data.data);
-            setLastScanTime(data.lastScan || Date.now());
-          }
-        } catch (e) {
-          console.error('Fallback scan error:', e);
-        } finally {
-          setIsScanning(false);
-        }
+        eventSourceRef.current = null;
+        setScanError('Veza sa serverom je prekinuta. Ne pokrećem duplo skeniranje; pokušajte ponovo.');
+        finishScanning();
       };
     } catch (e) {
+      setScanError(e instanceof Error ? e.message : 'Pokretanje skeniranja nije uspelo');
+      finishScanning();
       console.error('Scan initiate error:', e);
-      setIsScanning(false);
     }
   };
 
+  // Opciono automatsko skeniranje. Podrazumevano je isključeno.
+  useEffect(() => {
+    if (!autoScanInterval) return;
+    const timer = setInterval(() => {
+      if (!isScanningRef.current) void handleStartLiveScan(targetSubnet);
+    }, autoScanInterval * 1000);
+    return () => clearInterval(timer);
+  }, [autoScanInterval, targetSubnet]);
+
   const handleSavePortLabel = async (ip: string) => {
     try {
-      await fetch('/api/labels', {
+      const res = await fetch('/api/labels', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ip, label: editingLabel.trim() }),
       });
+      if (!res.ok) throw new Error('Čuvanje oznake nije uspelo');
       setSubnetData((prev) =>
         prev.map((p) => (p.ip === ip ? { ...p, customLabel: editingLabel.trim() } : p))
       );
@@ -223,6 +278,11 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
   // Filter & sort
   const filteredList = filterSubnetDevices(subnetData, filterMode, searchQuery, sortMode);
   const stats = calculateSubnetStats(subnetData);
+  const subnetByLastOctet = new Map<number, SubnetDevice>();
+  subnetData.forEach((device) => {
+    const lastOctet = Number(device.ip.split('.').pop());
+    if (Number.isInteger(lastOctet)) subnetByLastOctet.set(lastOctet, device);
+  });
 
   return (
     <div className="space-y-4">
@@ -248,8 +308,27 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
             </div>
           </div>
 
-          {/* ACTION BUTTON */}
-          <div className="flex items-center gap-2">
+          {/* AUTOMATIC INTERVAL + ACTION BUTTON */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="flex items-center gap-2 text-[11px] text-gray-400 bg-[#14161f] border border-[#262a36] rounded-xl px-3 py-2">
+              <Clock className="w-3.5 h-3.5 text-blue-400" />
+              <span>Automatski:</span>
+              <select
+                value={autoScanInterval}
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  setAutoScanInterval(value);
+                  localStorage.setItem('netscan_scanner_auto_interval', String(value));
+                }}
+                className="bg-[#0f1117] text-gray-200 border border-[#2b3142] rounded-lg px-2 py-1 outline-none focus:border-blue-500"
+                title="Na koliko minuta da se automatski ponovi skeniranje"
+              >
+                <option value={0}>Isključeno</option>
+                <option value={60}>na 1 min</option>
+                <option value={300}>na 5 min</option>
+                <option value={900}>na 15 min</option>
+              </select>
+            </label>
             <button
               onClick={() => handleStartLiveScan(targetSubnet)}
               disabled={isScanning}
@@ -258,8 +337,8 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
               <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
               <span>
                 {isScanning
-                  ? `Skeniram (${scanProgress.scanned}/256)...`
-                  : `Pokreni Skeniranje Uživo (${targetSubnet}.0 - 255)`}
+                  ? `Skeniram (${scanProgress.scanned}/${scanProgress.total})...`
+                  : `Skeniraj (${targetSubnet}.0 - 255)`}
               </span>
             </button>
           </div>
@@ -276,7 +355,13 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
               <input
                 type="text"
                 value={targetSubnet}
-                onChange={(e) => setTargetSubnet(e.target.value)}
+                disabled={isScanning}
+                onChange={(e) => {
+                  setTargetSubnet(e.target.value);
+                  setSubnetData([]);
+                  setLastScanTime(null);
+                  setScanError(null);
+                }}
                 placeholder="npr. 192.168.1 ili 11.29.50"
                 className="w-36 px-2.5 py-1.5 bg-[#0f1117] border border-[#2b3142] rounded-lg text-xs font-mono font-bold text-emerald-400 outline-none focus:border-emerald-500"
               />
@@ -291,6 +376,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
                 return (
                   <button
                     key={sub}
+                    disabled={isScanning}
                     onClick={() => {
                       setTargetSubnet(sub);
                       handleStartLiveScan(sub);
@@ -327,7 +413,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
                 Uživo ispitivanje adresa od 0 do 255...
               </span>
               <span className="font-mono text-gray-300 font-bold">
-                {scanProgress.scanned} / 256 ({scanProgress.percent}%) • Pronađeno aktivnih: {scanProgress.activeCount}
+                {scanProgress.scanned} / {scanProgress.total} ({scanProgress.percent}%) • Pronađeno aktivnih: {scanProgress.activeCount}
               </span>
             </div>
             <div className="w-full h-2 bg-[#0f1117] rounded-full overflow-hidden border border-[#262a36]">
@@ -338,20 +424,26 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
             </div>
           </div>
         )}
+
+        {scanError && (
+          <div className="rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-300" role="alert">
+            {scanError}
+          </div>
+        )}
       </div>
 
       {/* 2. STATS OVERVIEW CARDS */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="bg-[#181b24] p-3 rounded-xl border border-[#262a36]">
-          <div className="text-[11px] text-gray-400 font-semibold">Ukupno Adresa</div>
-          <div className="text-xl font-bold font-mono text-white mt-0.5">256</div>
+          <div className="text-[11px] text-gray-400 font-semibold">Provereno adresa</div>
+          <div className="text-xl font-bold font-mono text-white mt-0.5">{stats.total}<span className="text-sm text-gray-500"> / 256</span></div>
           <div className="text-[10px] text-gray-500 mt-1 font-mono">{targetSubnet}.0 — 255</div>
         </div>
 
         <div className="bg-[#181b24] p-3 rounded-xl border border-[#262a36]">
           <div className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            Aktivno (ONLINE)
+            Zauzeto (ONLINE)
           </div>
           <div className="text-xl font-bold font-mono text-emerald-400 mt-0.5">{stats.online}</div>
           <div className="text-[10px] text-gray-500 mt-1">Uređaji u radu</div>
@@ -371,12 +463,58 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
             {lastScanTime ? new Date(lastScanTime).toLocaleTimeString('sr-RS') : 'Nije skenirano'}
           </div>
           <div className="text-[10px] text-gray-500 mt-1">
-            {lastScanTime ? new Date(lastScanTime).toLocaleDateString('sr-RS') : '-'}
+            {lastScanTime ? new Date(lastScanTime).toLocaleDateString('sr-RS') : 'Kliknite na Skeniraj'}
+            {lastScanDuration !== null && ` • ${(lastScanDuration / 1000).toFixed(1)}s`}
           </div>
         </div>
       </div>
 
-      {/* 3. FILTER, SEARCH AND CONTROLS BAR */}
+      {/* 3. VISUAL MAP OF ALL 256 ADDRESSES */}
+      <div className="bg-[#181b24] rounded-xl border border-[#262a36] p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Network className="w-4 h-4 text-blue-400" /> Mapa zauzetosti — {targetSubnet}.0/24
+            </h3>
+            <p className="text-[11px] text-gray-500 mt-0.5">Klik na proverenu adresu je pronalazi u tabeli ispod.</p>
+          </div>
+          <div className="flex items-center gap-3 text-[10px] font-semibold">
+            <span className="flex items-center gap-1 text-emerald-400"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500" /> Zauzeto</span>
+            <span className="flex items-center gap-1 text-gray-400"><span className="w-2.5 h-2.5 rounded-sm bg-gray-600" /> Slobodno</span>
+            <span className="flex items-center gap-1 text-gray-500"><span className="w-2.5 h-2.5 rounded-sm bg-[#0f1117] border border-[#2b3142]" /> Nije provereno</span>
+          </div>
+        </div>
+        <div className="grid grid-cols-8 md:grid-cols-[repeat(16,minmax(0,1fr))] gap-1">
+          {Array.from({ length: 256 }, (_, lastOctet) => {
+            const device = subnetByLastOctet.get(lastOctet);
+            const isOnline = device?.status === 'ONLINE';
+            const ip = `${targetSubnet}.${lastOctet}`;
+            return (
+              <button
+                key={lastOctet}
+                type="button"
+                disabled={!device}
+                onClick={() => {
+                  setFilterMode('all');
+                  setSearchQuery(ip);
+                }}
+                title={device ? `${ip} — ${isOnline ? 'ZAUZETO' : 'SLOBODNO'} — ${device.customLabel || device.name}` : `${ip} — nije provereno`}
+                className={`h-6 rounded text-[9px] font-mono font-bold border transition-all ${
+                  device
+                    ? isOnline
+                      ? 'bg-emerald-600/80 border-emerald-400/60 text-white hover:bg-emerald-500'
+                      : 'bg-gray-700/60 border-gray-600/60 text-gray-300 hover:bg-gray-600'
+                    : 'bg-[#0f1117] border-[#202534] text-gray-700 cursor-default'
+                }`}
+              >
+                {lastOctet}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 4. FILTER, SEARCH AND CONTROLS BAR */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-[#14161f] p-3 rounded-xl border border-[#262a36]">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-gray-400 font-semibold flex items-center gap-1">
@@ -391,7 +529,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
                   : 'text-gray-400 hover:text-white'
               }`}
             >
-              Sve (256)
+              Sve ({stats.total})
             </button>
             <button
               onClick={() => setFilterMode('online')}
@@ -402,7 +540,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
               }`}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              Samo Aktivne ({stats.online})
+              Samo Zauzete ({stats.online})
             </button>
             <button
               onClick={() => setFilterMode('offline')}
@@ -456,7 +594,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
         </div>
       </div>
 
-      {/* 4. TABLE OF ALL 256 SUBNET ADDRESSES */}
+      {/* 5. TABLE OF ALL 256 SUBNET ADDRESSES */}
       <div className="bg-[#181b24] rounded-xl border border-[#262a36] overflow-hidden shadow-2xl">
         <div className="overflow-x-auto max-h-[620px] overflow-y-auto">
           <table className="w-full text-left border-collapse">
@@ -483,7 +621,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
                 filteredList.map((d) => {
                   const isOnline = d.status === 'ONLINE';
                   const isEditing = editingIp === d.ip;
-                  const isAdded = Boolean(addedIps[d.ip]);
+                  const isAdded = Boolean(addedIps[d.ip] || devices.some((monitored) => monitored.ip === d.ip));
 
                   return (
                     <tr
@@ -506,7 +644,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
                               isOnline ? 'bg-emerald-400 shadow-[0_0_6px_#22c55e]' : 'bg-gray-600'
                             }`}
                           />
-                          {isOnline ? 'ONLINE' : 'SLOBODNO'}
+                          {isOnline ? 'ZAUZETO' : 'SLOBODNO'}
                         </span>
                       </td>
 

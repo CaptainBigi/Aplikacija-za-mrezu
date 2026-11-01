@@ -99,6 +99,10 @@ test('parseSubnetInput parses various subnet notation inputs', () => {
   assert.equal(parseSubnetInput('10.0.0.0/24'), '10.0.0');
   assert.equal(parseSubnetInput('11.29.50'), '11.29.50');
   assert.equal(parseSubnetInput(''), '11.29.50');
+  assert.equal(parseSubnetInput('192.168.1.300'), '');
+  assert.equal(parseSubnetInput('192.168.1.1.1'), '');
+  assert.equal(parseSubnetInput('192.168.1/16'), '');
+  assert.equal(parseSubnetInput('invalid'), '');
 });
 
 test('calculateSubnetStats accurately counts online and offline', () => {
