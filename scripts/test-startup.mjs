@@ -49,6 +49,7 @@ function launch(directory, port) {
       PORT: String(port),
       NET_SCAN_OPEN_BROWSER: 'false',
       NET_SCAN_DISABLE_MONITOR: 'true',
+      NET_SCAN_DISABLE_AUTO_SCAN: 'true',
       WIDGET_API_KEY: 'moj_tajni_token_123',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -158,6 +159,61 @@ test('standalone paket se pokrece i servira API i web interfejs', { timeout: 150
     });
     assert.equal(preflightResponse.status, 200);
     assert.match(preflightResponse.headers.get('access-control-allow-headers') || '', /X-API-Key/i);
+  } finally {
+    await stop(child);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('sacuvane podmreze imaju zajednicki interval, a uklanjanje ne brise rezultate', { timeout: 15000 }, async () => {
+  const directory = makeStandaloneCopy((data) => {
+    data.scannerConfig = {
+      subnets: ['127.0.0'],
+      autoScanIntervalMinutes: 0,
+      lastScanAllCompletedAt: null,
+    };
+    data.switchNetworks = {
+      '127.0.0': [{
+        id: 'port-1', name: 'Test', hostname: 'localhost', mac: '-', type: 'Server',
+        ip: '127.0.0.1', status: 'ONLINE', latency: '1 ms', lastSeenOnline: 12345,
+      }],
+    };
+    data.switchScanTimes = { '127.0.0': 12345 };
+  });
+  const port = await getFreePort();
+  const { child, output } = launch(directory, port);
+
+  try {
+    await waitForHealth(child, port, output);
+    const initial = await (await fetch(`http://127.0.0.1:${port}/api/scanner/config`)).json();
+    assert.equal(initial.subnets[0].base, '127.0.0');
+    assert.equal(initial.subnets[0].activeCount, 1);
+    assert.equal(initial.subnets[0].lastScan, 12345);
+
+    const addResponse = await fetch(`http://127.0.0.1:${port}/api/scanner/subnets`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subnet: '10.20.30' }),
+    });
+    assert.equal(addResponse.status, 200);
+    assert.deepEqual((await addResponse.json()).subnets.map((subnet) => subnet.base), ['127.0.0', '10.20.30']);
+
+    const intervalResponse = await fetch(`http://127.0.0.1:${port}/api/scanner/config`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoScanIntervalMinutes: 7 }),
+    });
+    assert.equal(intervalResponse.status, 200);
+    assert.equal((await intervalResponse.json()).autoScanIntervalMinutes, 7);
+
+    const invalidInterval = await fetch(`http://127.0.0.1:${port}/api/scanner/config`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoScanIntervalMinutes: 1.5 }),
+    });
+    assert.equal(invalidInterval.status, 400);
+
+    const removeResponse = await fetch(`http://127.0.0.1:${port}/api/scanner/subnets/127.0.0`, { method: 'DELETE' });
+    assert.equal(removeResponse.status, 200);
+    assert.deepEqual((await removeResponse.json()).subnets.map((subnet) => subnet.base), ['10.20.30']);
+
+    const cached = await (await fetch(`http://127.0.0.1:${port}/api/scan-subnet?subnet=127.0.0`)).json();
+    assert.equal(cached.data.length, 1);
+    assert.equal(cached.lastScan, 12345);
   } finally {
     await stop(child);
     fs.rmSync(directory, { recursive: true, force: true });

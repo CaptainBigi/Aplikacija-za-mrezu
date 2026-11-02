@@ -8,7 +8,9 @@ Aplikacija za nadzor lokalne/offline mreže, sa mapama zgrada, web terminalom, s
 - Server proverava uređaje 5 sekundi nakon pokretanja i zatim na svakih 60 sekundi.
 - Ako ICMP ping nije dozvoljen, dostupnost se proverava paralelno preko TCP portova 80, 443, 445, 135, 22 i 9100.
 - Skener prikazuje vreme poslednjeg završenog skeniranja i mapu svih 256 adresa: zeleno je zauzeto, sivo slobodno, a tamno neprovereno.
-- Automatsko skeniranje podmreže može da se uključi na 1, 5 ili 15 minuta; podrazumevano je isključeno.
+- U skener se može dodati više /24 podmreža. Server ih automatski skenira jednu po jednu na proizvoljan interval od 1 do 1440 minuta; 0 minuta isključuje automatiku.
+- Automatika radi i kada skener nije otvoren. Rezultat svake mreže se čuva, a uklanjanje iz automatske liste ne briše poslednju mapu zauzetosti.
+- Dok je skener otvoren, klik na kružić uređaja u gornjem monitoru direktno otvara i skroluje do mape zauzetosti njegove podmreže.
 
 ## Pokretanje na Windowsu (preporučeno)
 

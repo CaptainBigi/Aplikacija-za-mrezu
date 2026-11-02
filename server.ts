@@ -142,12 +142,19 @@ interface ActivityLogItem {
   details?: string;
 }
 
+interface ScannerConfig {
+  subnets: string[];
+  autoScanIntervalMinutes: number;
+  lastScanAllCompletedAt: number | null;
+}
+
 interface Database {
   devices: Device[];
   maps: BuildingMap[];
   logs: LogEntry[];
   switchNetworks: Record<string, SubnetDevice[]>;
   switchScanTimes: Record<string, number>;
+  scannerConfig: ScannerConfig;
   customLabels: Record<string, string>;
   chat: ChatMessage[];
   clientSessions?: Record<string, ClientSession>;
@@ -272,6 +279,11 @@ let db: Database = {
   ],
   switchNetworks: {},
   switchScanTimes: {},
+  scannerConfig: {
+    subnets: ['11.29.50'],
+    autoScanIntervalMinutes: 0,
+    lastScanAllCompletedAt: null,
+  },
   customLabels: {
     '11.29.50.1': 'Glavni Ulazni Switch',
     '11.29.50.10': 'Glavni Fajl Server',
@@ -313,12 +325,18 @@ if (primaryDbPath) {
   try {
     const fileContent = fs.readFileSync(primaryDbPath, 'utf8');
     const parsed = JSON.parse(fileContent);
+    const cachedScannerSubnets = Object.keys(parsed.switchNetworks || {})
+      .filter((key) => normalizeSubnetBase(key) === key);
     db = {
       devices: parsed.devices || db.devices,
       maps: parsed.maps || [],
       logs: parsed.logs || [],
       switchNetworks: parsed.switchNetworks || {},
       switchScanTimes: parsed.switchScanTimes || {},
+      scannerConfig: normalizeScannerConfig(parsed.scannerConfig, {
+        ...db.scannerConfig,
+        subnets: cachedScannerSubnets.length > 0 ? cachedScannerSubnets : db.scannerConfig.subnets,
+      }),
       customLabels: parsed.customLabels || {},
       chat: parsed.chat || [],
       clientSessions: parsed.clientSessions || {},
@@ -518,6 +536,27 @@ function normalizeSubnetBase(input: unknown): string | null {
     return null;
   }
   return parts.join('.');
+}
+
+function normalizeScannerConfig(input: unknown, fallback: ScannerConfig): ScannerConfig {
+  const candidate: Partial<ScannerConfig> = input && typeof input === 'object' ? input as Partial<ScannerConfig> : {};
+  const subnets = Array.isArray(candidate.subnets)
+    ? Array.from(new Set(
+        candidate.subnets
+          .map((subnet) => normalizeSubnetBase(subnet))
+          .filter((subnet): subnet is string => Boolean(subnet))
+      ))
+    : [...fallback.subnets];
+  const interval = Number(candidate.autoScanIntervalMinutes);
+  const lastCompleted = Number(candidate.lastScanAllCompletedAt);
+
+  return {
+    subnets,
+    autoScanIntervalMinutes: Number.isInteger(interval) && interval >= 0 && interval <= 1440
+      ? interval
+      : fallback.autoScanIntervalMinutes,
+    lastScanAllCompletedAt: Number.isFinite(lastCompleted) && lastCompleted > 0 ? lastCompleted : null,
+  };
 }
 
 // Quick ping probe using ICMP if available, with real TCP socket fallback.
@@ -1132,6 +1171,132 @@ async function scanSubnetReal(
       activeSubnetScans.delete(normalizedBase);
     }
   }
+}
+
+// Sacuvane podmreze i zajednicko redosledno automatsko skeniranje.
+const savedScanAllState = {
+  running: false,
+  currentSubnet: null as string | null,
+  completed: 0,
+  total: 0,
+  lastError: null as string | null,
+};
+
+function getScannerConfigPayload() {
+  const interval = db.scannerConfig.autoScanIntervalMinutes;
+  const lastCompleted = db.scannerConfig.lastScanAllCompletedAt;
+  return {
+    autoScanIntervalMinutes: interval,
+    lastScanAllCompletedAt: lastCompleted,
+    nextAutoScanAt: interval > 0 && db.scannerConfig.subnets.length > 0
+      ? (lastCompleted ? lastCompleted + interval * 60000 : Date.now())
+      : null,
+    subnets: db.scannerConfig.subnets.map((base) => {
+      const cached = db.switchNetworks[base] || [];
+      return {
+        base,
+        lastScan: db.switchScanTimes[base] || null,
+        activeCount: cached.filter((device) => device.status === 'ONLINE').length,
+        total: cached.length,
+        isScanning: activeSubnetScans.has(base),
+      };
+    }),
+    scanAll: { ...savedScanAllState },
+  };
+}
+
+async function runSavedSubnetScans(): Promise<boolean> {
+  if (savedScanAllState.running) return false;
+  const subnets = [...db.scannerConfig.subnets];
+  if (subnets.length === 0) return false;
+
+  savedScanAllState.running = true;
+  savedScanAllState.currentSubnet = subnets[0];
+  savedScanAllState.completed = 0;
+  savedScanAllState.total = subnets.length;
+  savedScanAllState.lastError = null;
+
+  try {
+    for (const base of subnets) {
+      savedScanAllState.currentSubnet = base;
+      // Ako je mreza uklonjena tokom rada, preskacemo je i nastavljamo sa ostalima.
+      if (db.scannerConfig.subnets.includes(base)) {
+        try {
+          const matchingSwitch = db.devices.find(
+            (device) => device.ip.startsWith(`${base}.`) && device.type === 'Switch'
+          );
+          await scanSubnetReal(base, matchingSwitch);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'nepoznata greška';
+          savedScanAllState.lastError = `${base}.0/24: ${reason}`;
+          console.error(`[AUTO-SCAN] Greška za ${base}.0/24:`, error);
+        }
+      }
+      savedScanAllState.completed += 1;
+    }
+  } finally {
+    savedScanAllState.running = false;
+    savedScanAllState.currentSubnet = null;
+    db.scannerConfig.lastScanAllCompletedAt = Date.now();
+    saveDB();
+  }
+  return true;
+}
+
+app.get('/api/scanner/config', (req, res) => {
+  res.json(getScannerConfigPayload());
+});
+
+app.post('/api/scanner/subnets', (req, res) => {
+  const base = normalizeSubnetBase(req.body?.subnet);
+  if (!base) return res.status(400).json({ error: 'Neispravan /24 opseg. Primer: 192.168.1' });
+  if (!db.scannerConfig.subnets.includes(base)) {
+    db.scannerConfig.subnets.push(base);
+    saveDB();
+  }
+  res.json(getScannerConfigPayload());
+});
+
+app.delete('/api/scanner/subnets/:subnet', (req, res) => {
+  const base = normalizeSubnetBase(req.params.subnet);
+  if (!base) return res.status(400).json({ error: 'Neispravan /24 opseg' });
+  if (!db.scannerConfig.subnets.includes(base)) {
+    return res.status(404).json({ error: 'Podmreža nije u sačuvanoj listi' });
+  }
+  db.scannerConfig.subnets = db.scannerConfig.subnets.filter((subnet) => subnet !== base);
+  // Namerno ne brisemo switchNetworks/switchScanTimes: stari rezultat ostaje sacuvan.
+  saveDB();
+  res.json(getScannerConfigPayload());
+});
+
+app.put('/api/scanner/config', (req, res) => {
+  const interval = Number(req.body?.autoScanIntervalMinutes);
+  if (!Number.isInteger(interval) || interval < 0 || interval > 1440) {
+    return res.status(400).json({ error: 'Interval mora biti ceo broj od 0 do 1440 minuta (0 = isključeno)' });
+  }
+  db.scannerConfig.autoScanIntervalMinutes = interval;
+  saveDB();
+  res.json(getScannerConfigPayload());
+});
+
+app.post('/api/scanner/scan-all', (req, res) => {
+  if (db.scannerConfig.subnets.length === 0) {
+    return res.status(400).json({ error: 'Prvo dodajte bar jednu podmrežu u listu' });
+  }
+  void runSavedSubnetScans().catch((error) => console.error('[SCAN-ALL] Greška:', error));
+  res.status(202).json(getScannerConfigPayload());
+});
+
+if (process.env.NET_SCAN_DISABLE_AUTO_SCAN !== 'true') {
+  const autoScanTimer = setInterval(() => {
+    const interval = db.scannerConfig.autoScanIntervalMinutes;
+    if (interval <= 0 || db.scannerConfig.subnets.length === 0 || savedScanAllState.running) return;
+    const lastCompleted = db.scannerConfig.lastScanAllCompletedAt || 0;
+    if (Date.now() - lastCompleted >= interval * 60000) {
+      void runSavedSubnetScans().catch((error) => console.error('[AUTO-SCAN] Greška:', error));
+    }
+  }, 5000);
+  autoScanTimer.unref();
 }
 
 // 1. Get detected network subnets from local host interfaces and database

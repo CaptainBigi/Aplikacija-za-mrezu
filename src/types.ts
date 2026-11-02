@@ -30,6 +30,28 @@ export interface SubnetDevice {
   customLabel?: string;
 }
 
+export interface ScannerSubnetStatus {
+  base: string;
+  lastScan: number | null;
+  activeCount: number;
+  total: number;
+  isScanning: boolean;
+}
+
+export interface ScannerConfigResponse {
+  autoScanIntervalMinutes: number;
+  lastScanAllCompletedAt: number | null;
+  nextAutoScanAt: number | null;
+  subnets: ScannerSubnetStatus[];
+  scanAll: {
+    running: boolean;
+    currentSubnet: string | null;
+    completed: number;
+    total: number;
+    lastError: string | null;
+  };
+}
+
 export interface LogEntry {
   id: number;
   deviceName: string;

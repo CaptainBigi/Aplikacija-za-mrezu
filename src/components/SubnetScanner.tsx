@@ -6,7 +6,6 @@ import {
   Zap,
   Edit2,
   RefreshCw,
-  ArrowLeft,
   Search,
   Network,
   Printer,
@@ -25,7 +24,7 @@ import {
   Activity,
   Laptop
 } from 'lucide-react';
-import { Device, SubnetDevice } from '../types';
+import { Device, SubnetDevice, ScannerConfigResponse } from '../types';
 import { parseSubnetInput, filterSubnetDevices, calculateSubnetStats } from '../utils/networkUtils';
 
 interface SubnetScannerProps {
@@ -36,6 +35,7 @@ interface SubnetScannerProps {
   onWakeDevice: (mac: string) => void;
   onDeleteDevice: (id: number) => void;
   onAddDeviceToMonitoring?: (device: { name: string; ip: string; location: string; type: string; mac?: string }) => void;
+  focusMapRequest?: number;
 }
 
 export const SubnetScanner: React.FC<SubnetScannerProps> = ({
@@ -46,6 +46,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
   onWakeDevice,
   onDeleteDevice,
   onAddDeviceToMonitoring,
+  focusMapRequest = 0,
 }) => {
   const [targetSubnet, setTargetSubnet] = useState<string>('11.29.50');
   const [detectedSubnets, setDetectedSubnets] = useState<string[]>(['11.29.50', '192.168.1']);
@@ -69,21 +70,45 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
   const isScanningRef = useRef(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [lastScanDuration, setLastScanDuration] = useState<number | null>(null);
-  const [autoScanInterval, setAutoScanInterval] = useState<number>(() => {
-    const saved = Number(localStorage.getItem('netscan_scanner_auto_interval'));
-    return [0, 60, 300, 900].includes(saved) ? saved : 0;
-  });
+  const [scannerConfig, setScannerConfig] = useState<ScannerConfigResponse | null>(null);
+  const [autoIntervalDraft, setAutoIntervalDraft] = useState(0);
+  const [newSubnetInput, setNewSubnetInput] = useState('11.29.50');
+  const mapRef = useRef<HTMLDivElement>(null);
+  const lastScanTimeRef = useRef<number | null>(null);
+  const subnetLoadRequestRef = useRef(0);
+  const targetSubnetRef = useRef(targetSubnet);
 
   useEffect(() => {
     isScanningRef.current = isScanning;
   }, [isScanning]);
 
+  useEffect(() => {
+    lastScanTimeRef.current = lastScanTime;
+  }, [lastScanTime]);
+
+  useEffect(() => {
+    targetSubnetRef.current = targetSubnet;
+  }, [targetSubnet]);
+
+  useEffect(() => {
+    if (scannerConfig) setAutoIntervalDraft(scannerConfig.autoScanIntervalMinutes);
+  }, [scannerConfig?.autoScanIntervalMinutes]);
+
+  useEffect(() => {
+    if (focusMapRequest <= 0) return;
+    const timer = window.setTimeout(() => {
+      mapRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [focusMapRequest]);
+
   useEffect(() => () => {
     eventSourceRef.current?.close();
   }, []);
 
-  // Fetch detected subnets on mount
+  // Fetch detected and saved subnets on mount
   useEffect(() => {
+    void loadScannerConfig();
     fetch('/api/network/subnets')
       .then((res) => res.json())
       .then((data) => {
@@ -96,6 +121,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
 
   // Sync target subnet when switch selected
   useEffect(() => {
+    stopLocalScanView();
     if (selectedSwitch) {
       const parts = selectedSwitch.ip.split('.');
       if (parts.length >= 3) {
@@ -108,7 +134,30 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
     }
   }, [selectedSwitch]);
 
+  const stopLocalScanView = () => {
+    if (!isScanningRef.current) return;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    isScanningRef.current = false;
+    setIsScanning(false);
+    subnetLoadRequestRef.current += 1;
+  };
+
+  const loadScannerConfig = async (): Promise<ScannerConfigResponse | null> => {
+    try {
+      const res = await fetch('/api/scanner/config', { cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setScannerConfig(data);
+      return data as ScannerConfigResponse;
+    } catch (error) {
+      console.error('Greška pri učitavanju podešavanja skenera:', error);
+      return null;
+    }
+  };
+
   const loadSubnetData = async (base: string, switchId?: number) => {
+    const requestId = ++subnetLoadRequestRef.current;
     try {
       setScanError(null);
       const url = switchId
@@ -117,12 +166,109 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
       const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (requestId !== subnetLoadRequestRef.current) return;
 
       setSubnetData(Array.isArray(data.data) ? data.data : []);
       setLastScanTime(typeof data.lastScan === 'number' ? data.lastScan : null);
     } catch (e) {
+      if (requestId !== subnetLoadRequestRef.current) return;
       setScanError(e instanceof Error ? e.message : 'Učitavanje podmreže nije uspelo');
       console.error('Greška pri učitavanju podmreže:', e);
+    }
+  };
+
+  // Prati serversko automatsko skeniranje i osvezava otvorenu mapu tek kad se sacuva nov rezultat.
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      const config = await loadScannerConfig();
+      if (!config || isScanningRef.current || targetSubnetRef.current !== targetSubnet) return;
+      const selected = config.subnets.find((subnet) => subnet.base === targetSubnet);
+      if (selected?.lastScan && selected.lastScan !== lastScanTimeRef.current) {
+        await loadSubnetData(targetSubnet, selectedSwitch?.id);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [targetSubnet, selectedSwitch?.id]);
+
+  const selectSubnet = (base: string) => {
+    stopLocalScanView();
+    const cleanBase = parseSubnetInput(base);
+    if (!cleanBase) {
+      setScanError('Neispravan /24 opseg. Unesite npr. 192.168.1.');
+      return;
+    }
+    if (selectedSwitch) onSelectSwitch(null);
+    if (cleanBase !== targetSubnet) {
+      setTargetSubnet(cleanBase);
+      setSubnetData([]);
+      setLastScanTime(null);
+      setLastScanDuration(null);
+      setSearchQuery('');
+    }
+    setScanError(null);
+    void loadSubnetData(cleanBase);
+  };
+
+  const handleAddSubnet = async () => {
+    const cleanBase = parseSubnetInput(newSubnetInput);
+    if (!cleanBase) {
+      setScanError('Neispravan /24 opseg. Unesite npr. 192.168.1 ili 192.168.1.0/24.');
+      return;
+    }
+    try {
+      setScanError(null);
+      const res = await fetch('/api/scanner/subnets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subnet: cleanBase }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Dodavanje podmreže nije uspelo');
+      setScannerConfig(data);
+      setNewSubnetInput('');
+      selectSubnet(cleanBase);
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : 'Dodavanje podmreže nije uspelo');
+    }
+  };
+
+  const handleRemoveSubnet = async (base: string) => {
+    try {
+      const res = await fetch(`/api/scanner/subnets/${encodeURIComponent(base)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Uklanjanje podmreže nije uspelo');
+      setScannerConfig(data as ScannerConfigResponse);
+      // Brisanje iz automatike ne brise prikazani niti sacuvani rezultat.
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : 'Uklanjanje podmreže nije uspelo');
+    }
+  };
+
+  const handleSaveAutoInterval = async () => {
+    try {
+      const res = await fetch('/api/scanner/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoScanIntervalMinutes: Number(autoIntervalDraft) }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Čuvanje intervala nije uspelo');
+      setScannerConfig(data);
+      setScanError(null);
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : 'Čuvanje intervala nije uspelo');
+    }
+  };
+
+  const handleScanAllSaved = async () => {
+    try {
+      setScanError(null);
+      const res = await fetch('/api/scanner/scan-all', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Pokretanje grupnog skeniranja nije uspelo');
+      setScannerConfig(data);
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : 'Pokretanje grupnog skeniranja nije uspelo');
     }
   };
 
@@ -130,6 +276,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
     if (Array.isArray(data.data)) setSubnetData(data.data);
     setLastScanTime(typeof data.lastScan === 'number' ? data.lastScan : null);
     setLastScanDuration(Date.now() - startedAt);
+    void loadScannerConfig();
   };
 
   const finishScanning = () => {
@@ -139,7 +286,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
 
   // Live real-time scan using Server-Sent Events (POST fallback samo bez SSE podrške).
   const handleStartLiveScan = async (baseToScan = targetSubnet) => {
-    if (isScanningRef.current) return;
+    if (isScanningRef.current || scannerConfig?.scanAll.running) return;
 
     const cleanBase = parseSubnetInput(baseToScan);
     if (!cleanBase) {
@@ -148,9 +295,13 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
     }
 
     const startedAt = Date.now();
-    setTargetSubnet(cleanBase);
-    setSubnetData([]);
-    if (cleanBase !== targetSubnet) setLastScanTime(null);
+    subnetLoadRequestRef.current += 1;
+    if (cleanBase !== targetSubnet) {
+      setTargetSubnet(cleanBase);
+      setSubnetData([]);
+      setLastScanTime(null);
+      setLastScanDuration(null);
+    }
     setScanError(null);
     isScanningRef.current = true;
     setIsScanning(true);
@@ -180,6 +331,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
       eventSourceRef.current = es;
 
       es.onmessage = (event) => {
+        if (eventSourceRef.current !== es) return;
         try {
           const payload = JSON.parse(event.data);
           if (payload.type === 'progress') {
@@ -235,15 +387,6 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
     }
   };
 
-  // Opciono automatsko skeniranje. Podrazumevano je isključeno.
-  useEffect(() => {
-    if (!autoScanInterval) return;
-    const timer = setInterval(() => {
-      if (!isScanningRef.current) void handleStartLiveScan(targetSubnet);
-    }, autoScanInterval * 1000);
-    return () => clearInterval(timer);
-  }, [autoScanInterval, targetSubnet]);
-
   const handleSavePortLabel = async (ip: string) => {
     try {
       const res = await fetch('/api/labels', {
@@ -278,6 +421,8 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
   // Filter & sort
   const filteredList = filterSubnetDevices(subnetData, filterMode, searchQuery, sortMode);
   const stats = calculateSubnetStats(subnetData);
+  const scanAllRunning = Boolean(scannerConfig?.scanAll.running);
+  const isBusy = isScanning || scanAllRunning;
   const subnetByLastOctet = new Map<number, SubnetDevice>();
   subnetData.forEach((device) => {
     const lastOctet = Number(device.ip.split('.').pop());
@@ -286,145 +431,190 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* 1. TOP SUBNET SELECTOR & LIVE SCAN CONTROLLER */}
+      {/* 1. SAVED SUBNETS AND SERVER-SIDE AUTOMATIC SCANNING */}
       <div className="bg-[#181b24] p-4 rounded-xl border border-[#262a36] space-y-4 shadow-xl">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                <Radio className="w-4 h-4 animate-pulse" />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                  Mrežni Skener Uživo
-                  <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-950/80 text-emerald-400 border border-emerald-500/30">
-                    Skenira svih 256 adresa (0 - 255)
-                  </span>
-                </h2>
-                <p className="text-xs text-gray-400">
-                  Uživo otkriva sve aktivne računare, štampače, servere i svičeve u lokalnoj mreži.
-                </p>
-              </div>
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Radio className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-white">Mrežni skener — sve sačuvane mreže</h2>
+              <p className="text-xs text-gray-400">Svaka /24 mreža se proverava redom, svih 256 adresa, a rezultat ostaje sačuvan.</p>
             </div>
           </div>
 
-          {/* AUTOMATIC INTERVAL + ACTION BUTTON */}
           <div className="flex items-center gap-2 flex-wrap">
-            <label className="flex items-center gap-2 text-[11px] text-gray-400 bg-[#14161f] border border-[#262a36] rounded-xl px-3 py-2">
+            <div className="flex items-center gap-2 text-[11px] text-gray-400 bg-[#14161f] border border-[#262a36] rounded-xl px-3 py-2">
               <Clock className="w-3.5 h-3.5 text-blue-400" />
-              <span>Automatski:</span>
-              <select
-                value={autoScanInterval}
-                onChange={(e) => {
-                  const value = Number(e.target.value);
-                  setAutoScanInterval(value);
-                  localStorage.setItem('netscan_scanner_auto_interval', String(value));
-                }}
-                className="bg-[#0f1117] text-gray-200 border border-[#2b3142] rounded-lg px-2 py-1 outline-none focus:border-blue-500"
-                title="Na koliko minuta da se automatski ponovi skeniranje"
+              <span>Automatski sve na</span>
+              <input
+                type="number"
+                min={0}
+                max={1440}
+                step={1}
+                value={autoIntervalDraft}
+                onChange={(e) => setAutoIntervalDraft(Number(e.target.value))}
+                className="w-16 px-2 py-1 bg-[#0f1117] border border-[#2b3142] rounded-lg text-xs text-white outline-none focus:border-blue-500"
+                title="Interval u minutima; 0 isključuje automatsko skeniranje"
+              />
+              <span>min</span>
+              <button
+                onClick={handleSaveAutoInterval}
+                className="px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold"
               >
-                <option value={0}>Isključeno</option>
-                <option value={60}>na 1 min</option>
-                <option value={300}>na 5 min</option>
-                <option value={900}>na 15 min</option>
-              </select>
-            </label>
+                Sačuvaj
+              </button>
+            </div>
             <button
-              onClick={() => handleStartLiveScan(targetSubnet)}
-              disabled={isScanning}
-              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-950/50 disabled:opacity-50 active:scale-[0.98]"
+              onClick={handleScanAllSaved}
+              disabled={isBusy || !scannerConfig?.subnets.length}
+              className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-xs font-bold disabled:opacity-50"
+              title="Skenira sve sačuvane mreže jednu po jednu"
             >
-              <RefreshCw className={`w-4 h-4 ${isScanning ? 'animate-spin' : ''}`} />
-              <span>
-                {isScanning
-                  ? `Skeniram (${scanProgress.scanned}/${scanProgress.total})...`
-                  : `Skeniraj (${targetSubnet}.0 - 255)`}
-              </span>
+              <RefreshCw className={`w-4 h-4 ${scanAllRunning ? 'animate-spin' : ''}`} />
+              {scanAllRunning ? 'Skeniram sačuvane mreže...' : 'Skeniraj sve sačuvane'}
             </button>
           </div>
         </div>
 
-        {/* SUBNET INPUT & DETECTED PRESETS */}
-        <div className="pt-2 border-t border-[#262a36] flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold text-gray-400 flex items-center gap-1">
-              <Network className="w-3.5 h-3.5 text-blue-400" /> Ciljna Podmreža:
-            </span>
-
-            <div className="flex items-center gap-1.5">
+        <div className="pt-3 border-t border-[#262a36] flex flex-col lg:flex-row lg:items-end justify-between gap-3">
+          <div className="space-y-2">
+            <label className="text-xs font-semibold text-gray-400 flex items-center gap-1">
+              <Network className="w-3.5 h-3.5 text-blue-400" /> Dodaj podmrežu u listu:
+            </label>
+            <div className="flex items-center gap-2 flex-wrap">
               <input
                 type="text"
-                value={targetSubnet}
-                disabled={isScanning}
-                onChange={(e) => {
-                  setTargetSubnet(e.target.value);
-                  setSubnetData([]);
-                  setLastScanTime(null);
-                  setScanError(null);
-                }}
-                placeholder="npr. 192.168.1 ili 11.29.50"
-                className="w-36 px-2.5 py-1.5 bg-[#0f1117] border border-[#2b3142] rounded-lg text-xs font-mono font-bold text-emerald-400 outline-none focus:border-emerald-500"
+                value={newSubnetInput}
+                onChange={(e) => setNewSubnetInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handleAddSubnet(); }}
+                placeholder="npr. 192.168.1 ili 10.10.1.0/24"
+                className="w-64 px-3 py-2 bg-[#0f1117] border border-[#2b3142] rounded-lg text-xs font-mono text-emerald-400 outline-none focus:border-emerald-500"
               />
-              <span className="text-xs font-mono text-gray-500">.0 / 24</span>
-            </div>
-
-            {/* QUICK PRESET CHIPS */}
-            <div className="flex items-center gap-1.5 flex-wrap pl-2 border-l border-[#262a36]">
-              <span className="text-[11px] text-gray-500">Detektovano:</span>
-              {detectedSubnets.map((sub) => {
-                const isSelected = targetSubnet === sub;
-                return (
+              <button
+                onClick={handleAddSubnet}
+                className="flex items-center gap-1.5 px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-bold"
+              >
+                <Plus className="w-3.5 h-3.5" /> Dodaj mrežu
+              </button>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-gray-500">Predlozi:</span>
+                {detectedSubnets.map((sub) => (
                   <button
                     key={sub}
-                    disabled={isScanning}
-                    onClick={() => {
-                      setTargetSubnet(sub);
-                      handleStartLiveScan(sub);
-                    }}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-mono font-semibold transition-all border ${
-                      isSelected
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-sm'
-                        : 'bg-[#14161f] text-gray-400 border-[#262a36] hover:text-white hover:border-gray-500'
-                    }`}
+                    onClick={() => setNewSubnetInput(sub)}
+                    className="px-2 py-1 rounded-lg text-[11px] font-mono bg-[#14161f] text-gray-400 border border-[#262a36] hover:text-white"
                   >
                     {sub}.x
                   </button>
-                );
-              })}
+                ))}
+              </div>
             </div>
           </div>
 
-          {selectedSwitch && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-gray-400">Otvorena mapa: <strong className="font-mono text-emerald-400">{targetSubnet}.0/24</strong></span>
             <button
-              onClick={() => onSelectSwitch(null)}
-              className="text-xs text-gray-400 hover:text-white flex items-center gap-1"
+              onClick={() => handleStartLiveScan(targetSubnet)}
+              disabled={isBusy}
+              className="flex items-center gap-2 px-3 py-2 bg-[#202534] hover:bg-[#2a3142] border border-[#34405a] text-white rounded-lg text-xs font-bold disabled:opacity-50"
             >
-              <ArrowLeft className="w-3.5 h-3.5" /> Prikaz svih svičeva
+              <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
+              {isScanning ? `Skeniram ${scanProgress.scanned}/${scanProgress.total}` : 'Skeniraj samo ovu mrežu'}
             </button>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-xs font-bold text-gray-300">
+              Sačuvane mreže za automatsko skeniranje ({scannerConfig?.subnets.length || 0})
+            </span>
+            <span className="text-[11px] text-gray-500">
+              {scannerConfig?.autoScanIntervalMinutes
+                ? `Uključeno na ${scannerConfig.autoScanIntervalMinutes} min${scannerConfig.nextAutoScanAt ? ` • sledeće: ${new Date(scannerConfig.nextAutoScanAt).toLocaleTimeString('sr-RS')}` : ''}`
+                : 'Automatsko skeniranje je isključeno (0 min)'}
+            </span>
+          </div>
+
+          {!scannerConfig?.subnets.length ? (
+            <div className="rounded-lg border border-dashed border-[#34405a] px-3 py-4 text-xs text-gray-500">
+              Dodajte jednu po jednu mrežu. One će biti sačuvane i automatski proveravane redom.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+              {scannerConfig.subnets.map((subnet) => {
+                const selected = subnet.base === targetSubnet;
+                return (
+                  <div
+                    key={subnet.base}
+                    className={`flex items-center gap-1 rounded-lg border p-1.5 ${selected ? 'border-emerald-500/60 bg-emerald-950/20' : 'border-[#262a36] bg-[#14161f]'}`}
+                  >
+                    <button
+                      onClick={() => selectSubnet(subnet.base)}
+                      className="flex-1 min-w-0 text-left px-2 py-1 rounded hover:bg-white/5"
+                      title="Otvori sačuvanu mapu zauzetosti"
+                    >
+                      <div className="font-mono text-xs font-bold text-gray-200 flex items-center gap-2">
+                        {subnet.isScanning && <RefreshCw className="w-3 h-3 text-emerald-400 animate-spin" />}
+                        {subnet.base}.0/24
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        <span className="text-emerald-400 font-bold">{subnet.activeCount} zauzeto</span>
+                        {' • '}{subnet.lastScan ? new Date(subnet.lastScan).toLocaleString('sr-RS') : 'Nije skenirano'}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => void handleRemoveSubnet(subnet.base)}
+                      className="p-2 text-gray-500 hover:text-red-400"
+                      title="Ukloni iz automatske liste; skenirani rezultat ostaje sačuvan"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
 
-        {/* PROGRESS BAR (IF SCANNING) */}
-        {isScanning && (
-          <div className="pt-2 space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-emerald-400 font-semibold flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                Uživo ispitivanje adresa od 0 do 255...
+        {scanAllRunning && scannerConfig && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-3 py-2 text-xs">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-emerald-400 font-bold">
+                Redosledno skeniranje: {scannerConfig.scanAll.currentSubnet || 'priprema'}.0/24
               </span>
-              <span className="font-mono text-gray-300 font-bold">
-                {scanProgress.scanned} / {scanProgress.total} ({scanProgress.percent}%) • Pronađeno aktivnih: {scanProgress.activeCount}
-              </span>
+              <span className="font-mono text-gray-300">{scannerConfig.scanAll.completed}/{scannerConfig.scanAll.total} mreža</span>
             </div>
-            <div className="w-full h-2 bg-[#0f1117] rounded-full overflow-hidden border border-[#262a36]">
+            <div className="w-full h-1.5 mt-2 bg-[#0f1117] rounded-full overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-emerald-500 via-teal-400 to-blue-500 transition-all duration-150 rounded-full"
-                style={{ width: `${scanProgress.percent}%` }}
+                className="h-full bg-emerald-500 transition-all"
+                style={{ width: `${scannerConfig.scanAll.total ? (scannerConfig.scanAll.completed / scannerConfig.scanAll.total) * 100 : 0}%` }}
               />
             </div>
           </div>
         )}
 
+        {isScanning && (
+          <div className="pt-2 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-emerald-400 font-semibold">Uživo ispitivanje adresa od 0 do 255...</span>
+              <span className="font-mono text-gray-300 font-bold">
+                {scanProgress.scanned} / {scanProgress.total} ({scanProgress.percent}%) • Zauzeto: {scanProgress.activeCount}
+              </span>
+            </div>
+            <div className="w-full h-2 bg-[#0f1117] rounded-full overflow-hidden border border-[#262a36]">
+              <div className="h-full bg-gradient-to-r from-emerald-500 via-teal-400 to-blue-500 transition-all" style={{ width: `${scanProgress.percent}%` }} />
+            </div>
+          </div>
+        )}
+
+        {scannerConfig?.scanAll.lastError && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">
+            Poslednja greška u grupnom skeniranju: {scannerConfig.scanAll.lastError}
+          </div>
+        )}
         {scanError && (
           <div className="rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-xs text-red-300" role="alert">
             {scanError}
@@ -470,7 +660,7 @@ export const SubnetScanner: React.FC<SubnetScannerProps> = ({
       </div>
 
       {/* 3. VISUAL MAP OF ALL 256 ADDRESSES */}
-      <div className="bg-[#181b24] rounded-xl border border-[#262a36] p-4 space-y-3">
+      <div ref={mapRef} className="scroll-mt-4 bg-[#181b24] rounded-xl border border-[#262a36] p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">

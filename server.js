@@ -23040,6 +23040,11 @@ var db = {
   ],
   switchNetworks: {},
   switchScanTimes: {},
+  scannerConfig: {
+    subnets: ["11.29.50"],
+    autoScanIntervalMinutes: 0,
+    lastScanAllCompletedAt: null
+  },
   customLabels: {
     "11.29.50.1": "Glavni Ulazni Switch",
     "11.29.50.10": "Glavni Fajl Server",
@@ -23079,12 +23084,17 @@ if (primaryDbPath) {
   try {
     const fileContent = fs.readFileSync(primaryDbPath, "utf8");
     const parsed = JSON.parse(fileContent);
+    const cachedScannerSubnets = Object.keys(parsed.switchNetworks || {}).filter((key) => normalizeSubnetBase(key) === key);
     db = {
       devices: parsed.devices || db.devices,
       maps: parsed.maps || [],
       logs: parsed.logs || [],
       switchNetworks: parsed.switchNetworks || {},
       switchScanTimes: parsed.switchScanTimes || {},
+      scannerConfig: normalizeScannerConfig(parsed.scannerConfig, {
+        ...db.scannerConfig,
+        subnets: cachedScannerSubnets.length > 0 ? cachedScannerSubnets : db.scannerConfig.subnets
+      }),
       customLabels: parsed.customLabels || {},
       chat: parsed.chat || [],
       clientSessions: parsed.clientSessions || {},
@@ -23255,6 +23265,19 @@ function normalizeSubnetBase(input) {
     return null;
   }
   return parts.join(".");
+}
+function normalizeScannerConfig(input, fallback) {
+  const candidate = input && typeof input === "object" ? input : {};
+  const subnets = Array.isArray(candidate.subnets) ? Array.from(new Set(
+    candidate.subnets.map((subnet) => normalizeSubnetBase(subnet)).filter((subnet) => Boolean(subnet))
+  )) : [...fallback.subnets];
+  const interval = Number(candidate.autoScanIntervalMinutes);
+  const lastCompleted = Number(candidate.lastScanAllCompletedAt);
+  return {
+    subnets,
+    autoScanIntervalMinutes: Number.isInteger(interval) && interval >= 0 && interval <= 1440 ? interval : fallback.autoScanIntervalMinutes,
+    lastScanAllCompletedAt: Number.isFinite(lastCompleted) && lastCompleted > 0 ? lastCompleted : null
+  };
 }
 async function probeHost(ip, timeoutSec = 1) {
   if (!isValidIPv4(ip)) return { alive: false, time: 0 };
@@ -23761,6 +23784,116 @@ async function scanSubnetReal(targetBase, switchDevice, onProgress) {
       activeSubnetScans.delete(normalizedBase);
     }
   }
+}
+var savedScanAllState = {
+  running: false,
+  currentSubnet: null,
+  completed: 0,
+  total: 0,
+  lastError: null
+};
+function getScannerConfigPayload() {
+  const interval = db.scannerConfig.autoScanIntervalMinutes;
+  const lastCompleted = db.scannerConfig.lastScanAllCompletedAt;
+  return {
+    autoScanIntervalMinutes: interval,
+    lastScanAllCompletedAt: lastCompleted,
+    nextAutoScanAt: interval > 0 && db.scannerConfig.subnets.length > 0 ? lastCompleted ? lastCompleted + interval * 6e4 : Date.now() : null,
+    subnets: db.scannerConfig.subnets.map((base) => {
+      const cached = db.switchNetworks[base] || [];
+      return {
+        base,
+        lastScan: db.switchScanTimes[base] || null,
+        activeCount: cached.filter((device) => device.status === "ONLINE").length,
+        total: cached.length,
+        isScanning: activeSubnetScans.has(base)
+      };
+    }),
+    scanAll: { ...savedScanAllState }
+  };
+}
+async function runSavedSubnetScans() {
+  if (savedScanAllState.running) return false;
+  const subnets = [...db.scannerConfig.subnets];
+  if (subnets.length === 0) return false;
+  savedScanAllState.running = true;
+  savedScanAllState.currentSubnet = subnets[0];
+  savedScanAllState.completed = 0;
+  savedScanAllState.total = subnets.length;
+  savedScanAllState.lastError = null;
+  try {
+    for (const base of subnets) {
+      savedScanAllState.currentSubnet = base;
+      if (db.scannerConfig.subnets.includes(base)) {
+        try {
+          const matchingSwitch = db.devices.find(
+            (device) => device.ip.startsWith(`${base}.`) && device.type === "Switch"
+          );
+          await scanSubnetReal(base, matchingSwitch);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "nepoznata gre\u0161ka";
+          savedScanAllState.lastError = `${base}.0/24: ${reason}`;
+          console.error(`[AUTO-SCAN] Gre\u0161ka za ${base}.0/24:`, error);
+        }
+      }
+      savedScanAllState.completed += 1;
+    }
+  } finally {
+    savedScanAllState.running = false;
+    savedScanAllState.currentSubnet = null;
+    db.scannerConfig.lastScanAllCompletedAt = Date.now();
+    saveDB();
+  }
+  return true;
+}
+app.get("/api/scanner/config", (req, res) => {
+  res.json(getScannerConfigPayload());
+});
+app.post("/api/scanner/subnets", (req, res) => {
+  const base = normalizeSubnetBase(req.body?.subnet);
+  if (!base) return res.status(400).json({ error: "Neispravan /24 opseg. Primer: 192.168.1" });
+  if (!db.scannerConfig.subnets.includes(base)) {
+    db.scannerConfig.subnets.push(base);
+    saveDB();
+  }
+  res.json(getScannerConfigPayload());
+});
+app.delete("/api/scanner/subnets/:subnet", (req, res) => {
+  const base = normalizeSubnetBase(req.params.subnet);
+  if (!base) return res.status(400).json({ error: "Neispravan /24 opseg" });
+  if (!db.scannerConfig.subnets.includes(base)) {
+    return res.status(404).json({ error: "Podmre\u017Ea nije u sa\u010Duvanoj listi" });
+  }
+  db.scannerConfig.subnets = db.scannerConfig.subnets.filter((subnet) => subnet !== base);
+  saveDB();
+  res.json(getScannerConfigPayload());
+});
+app.put("/api/scanner/config", (req, res) => {
+  const interval = Number(req.body?.autoScanIntervalMinutes);
+  if (!Number.isInteger(interval) || interval < 0 || interval > 1440) {
+    return res.status(400).json({ error: "Interval mora biti ceo broj od 0 do 1440 minuta (0 = isklju\u010Deno)" });
+  }
+  db.scannerConfig.autoScanIntervalMinutes = interval;
+  saveDB();
+  res.json(getScannerConfigPayload());
+});
+app.post("/api/scanner/scan-all", (req, res) => {
+  if (db.scannerConfig.subnets.length === 0) {
+    return res.status(400).json({ error: "Prvo dodajte bar jednu podmre\u017Eu u listu" });
+  }
+  void runSavedSubnetScans().catch((error) => console.error("[SCAN-ALL] Gre\u0161ka:", error));
+  res.status(202).json(getScannerConfigPayload());
+});
+if (process.env.NET_SCAN_DISABLE_AUTO_SCAN !== "true") {
+  const autoScanTimer = setInterval(() => {
+    const interval = db.scannerConfig.autoScanIntervalMinutes;
+    if (interval <= 0 || db.scannerConfig.subnets.length === 0 || savedScanAllState.running) return;
+    const lastCompleted = db.scannerConfig.lastScanAllCompletedAt || 0;
+    if (Date.now() - lastCompleted >= interval * 6e4) {
+      void runSavedSubnetScans().catch((error) => console.error("[AUTO-SCAN] Gre\u0161ka:", error));
+    }
+  }, 5e3);
+  autoScanTimer.unref();
 }
 app.get("/api/network/subnets", (req, res) => {
   const detected = getDetectedSubnets();

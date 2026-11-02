@@ -7,7 +7,6 @@ import {
   MapPin,
   Cpu,
   Clock,
-  Layers,
   ChevronRight,
   ShieldCheck,
   AlertTriangle
@@ -19,6 +18,7 @@ interface NetworkMonitorBarProps {
   onOpenCmd: (cmd: 'ping' | 'tracert' | 'telnet', ip: string, title?: string) => void;
   onOpenSwitch: (device: Device) => void;
   onWakeDevice: (mac: string) => void;
+  isScannerActive?: boolean;
 }
 
 export const NetworkMonitorBar: React.FC<NetworkMonitorBarProps> = ({
@@ -26,6 +26,7 @@ export const NetworkMonitorBar: React.FC<NetworkMonitorBarProps> = ({
   onOpenCmd,
   onOpenSwitch,
   onWakeDevice,
+  isScannerActive = false,
 }) => {
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
 
@@ -52,7 +53,7 @@ export const NetworkMonitorBar: React.FC<NetworkMonitorBarProps> = ({
           </span>
         </div>
         <div className="text-[11px] text-gray-500 hidden sm:block">
-          Kliknite na tačkicu za brzi pregled i pokretanje konzolne dijagnostike
+          {isScannerActive ? 'Kliknite na tačkicu za direktan prikaz mape zauzetosti' : 'Kliknite na tačkicu za brzi pregled i pokretanje konzolne dijagnostike'}
         </div>
       </div>
 
@@ -69,8 +70,15 @@ export const NetworkMonitorBar: React.FC<NetworkMonitorBarProps> = ({
             return (
               <button
                 key={device.id}
-                onClick={() => setSelectedDevice(isSelected ? null : device)}
-                title={`${device.name} (${device.ip}) — ${device.status}`}
+                onClick={() => {
+                  if (isScannerActive) {
+                    setSelectedDevice(null);
+                    onOpenSwitch(device);
+                    return;
+                  }
+                  setSelectedDevice(isSelected ? null : device);
+                }}
+                title={`${device.name} (${device.ip}) — ${device.status}${isScannerActive ? ' — otvori mapu zauzetosti' : ''}`}
                 className={`relative group p-0.5 rounded-full transition-all duration-200 focus:outline-none ${
                   isSelected ? 'ring-2 ring-blue-500 scale-125' : 'hover:scale-130'
                 }`}
@@ -91,7 +99,7 @@ export const NetworkMonitorBar: React.FC<NetworkMonitorBarProps> = ({
       </div>
 
       {/* SELECTED DEVICE INFO CARD */}
-      {selectedDevice && (
+      {selectedDevice && !isScannerActive && (
         <div
           className={`mt-3 p-4 bg-[#181b24] border rounded-xl border-l-4 transition-all duration-200 shadow-lg ${
             selectedDevice.status === 'ONLINE'
@@ -149,15 +157,6 @@ export const NetworkMonitorBar: React.FC<NetworkMonitorBarProps> = ({
 
             {/* ACTION BUTTONS */}
             <div className="flex items-center gap-1.5 flex-wrap">
-              {selectedDevice.type === 'Switch' && (
-                <button
-                  onClick={() => onOpenSwitch(selectedDevice)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-lg text-xs font-semibold transition-colors"
-                >
-                  <Layers className="w-3.5 h-3.5" /> Otvori Mrežu (0-255)
-                </button>
-              )}
-
               {selectedDevice.mac && selectedDevice.mac !== '-' && (
                 <button
                   onClick={() => onWakeDevice(selectedDevice.mac!)}

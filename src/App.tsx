@@ -65,6 +65,7 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [selectedSwitch, setSelectedSwitch] = useState<Device | null>(null);
+  const [scannerMapFocusRequest, setScannerMapFocusRequest] = useState(0);
 
   // Loading States
   const [isScanningAll, setIsScanningAll] = useState(false);
@@ -1408,8 +1409,10 @@ export default function App() {
               onOpenSwitch={(dev) => {
                 setSelectedSwitch(dev);
                 setActiveNav('scanner');
+                setScannerMapFocusRequest((request) => request + 1);
               }}
               onWakeDevice={handleWakeDevice}
+              isScannerActive={activeNav === 'scanner'}
             />
           )}
 
@@ -1458,6 +1461,7 @@ export default function App() {
                 onOpenSwitch={(dev) => {
                   setSelectedSwitch(dev);
                   setActiveNav('scanner');
+                  setScannerMapFocusRequest((request) => request + 1);
                 }}
                 onEditDevice={(dev) => {
                   setEditingDevice(dev);
@@ -1480,6 +1484,7 @@ export default function App() {
                 onWakeDevice={handleWakeDevice}
                 onDeleteDevice={handleDeleteDevice}
                 onAddDeviceToMonitoring={handleAddDeviceFromScanner}
+                focusMapRequest={scannerMapFocusRequest}
               />
             )}
 
